@@ -1,0 +1,14 @@
+# 配置（含 API Key）
+config.json
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+
+# 项目说明
+CLAUDE.md

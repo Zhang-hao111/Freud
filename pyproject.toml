@@ -1,0 +1,32 @@
+[project]
+name = "coding-agent"
+version = "0.1.0"
+description = "A lightweight coding agent that autonomously completes programming tasks via LLM interaction"
+requires-python = ">=3.11"
+authors = [
+    { name = "Lab Team", email = "lab@example.com" },
+]
+license = { text = "MIT" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "openai>=1.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/your-username/Lab-coding-agent"
+Source = "https://github.com/your-username/Lab-coding-agent"
+
+[project.scripts]
+freud = "agent.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["agent*"]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
