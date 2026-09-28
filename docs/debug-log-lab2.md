@@ -254,3 +254,26 @@ step8: done    → 任务完成 ✅
 1. `thinking-*.md` 思考过程导出（README 提到）尚未实现——tracer JSON 已可用，导出 markdown 属展示增强。
 2. `edit_file` 工具仍未提供（设计文档标注 MVP 非必需，`write_file` 可覆盖）。
 3. Hadoop 环境搭建与迭代一业务功能（清洗/评分/前端）未开始——待用户指示后推进。
+
+---
+
+# 阶段三：修复"全局 freud 命令打不开"（2026-09-28 晚）
+
+**现象**：在项目目录外运行 `freud`，打印"[!] 错误：未设置 API Key"后立即退出。
+
+**复现与根因**（三个因素叠加）：
+
+1. 全局 `freud` 是 9/9 `uv tool install` 装的旧代码，不包含阶段一/二的所有修复；
+2. 旧代码的 `_default_cfg_path()` 指向 cwd——某次在家目录运行 `freud` 时，`ensure_config()` 在 `~/config.json` 自动生成了**空的默认配置**（api_key 为空）；
+3. 配置查找 cwd 优先，这个空配置从此把其他候选全部挡住，在 ~ 下运行必然找不到 key。且旧逻辑根本没有全局配置位置，装完的工具在任何新目录都无 key 可用。
+
+**修改**（`agent/config.py`）：
+
+- 候选路径改为三级：**cwd → 源码仓库根 → 全局 `~/.agent-harness/config.json`**；
+- `_default_cfg_path()` 指向全局位置，`ensure_config()` 只在完全没有配置时创建全局默认——cwd 不再被自动写入垃圾配置；
+- 全局安装刷新：`uv tool install --reinstall .`；项目配置同步复制到 `~/.agent-harness/config.json`；
+- 清理：删除家目录的空 `~/config.json`（已备份 `/tmp/home-config.json.bak`）。
+
+**验证**：项目目录内/外运行 `freud` 均正常进入 REPL；batch mock 正常；26 个测试全绿。
+
+

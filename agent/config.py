@@ -4,25 +4,31 @@ import json
 import os
 from pathlib import Path
 
-# 配置文件位置（当前目录优先，找不到则回到项目根目录）
+# 配置文件位置（当前目录优先，其次源码仓库根，最后全局 ~/.agent-harness）
 CONFIG_FILENAME = "config.json"
+GLOBAL_CONFIG_DIR = ".agent-harness"
+
+
+def _candidate_paths() -> list[Path]:
+    """按优先级返回候选配置路径。"""
+    return [
+        Path.cwd() / CONFIG_FILENAME,
+        Path(__file__).resolve().parent.parent / CONFIG_FILENAME,
+        Path.home() / GLOBAL_CONFIG_DIR / CONFIG_FILENAME,
+    ]
 
 
 def _find_config() -> Path | None:
-    """从 cwd 或项目根目录查找 config.json。"""
-    candidates = [
-        Path.cwd() / CONFIG_FILENAME,
-        Path(__file__).resolve().parent.parent / CONFIG_FILENAME,
-    ]
-    for p in candidates:
+    """从候选位置查找 config.json。"""
+    for p in _candidate_paths():
         if p.exists():
             return p
     return None
 
 
 def _default_cfg_path() -> Path:
-    """默认配置文件路径（cwd）。"""
-    return Path.cwd() / CONFIG_FILENAME
+    """默认配置文件路径（全局 ~/.agent-harness，避免依赖 cwd）。"""
+    return Path.home() / GLOBAL_CONFIG_DIR / CONFIG_FILENAME
 
 
 def load_config() -> dict:
