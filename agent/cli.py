@@ -6,12 +6,15 @@ import sys
 from pathlib import Path
 
 from agent.config import load_config, save_config, ensure_config
-from agent.core import run_agent
+from agent.core import run_agent, _print_tool_call, _print_result, build_memory_block
+from agent.guardrail import guardrail
 from agent.llm import OpenAIProvider, MockLLM
 from agent.registry import create_default_registry
 from agent.memory import FileMemory
 from agent.tracer import Tracer
-from agent.types import SystemMessage, UserMessage, AssistantMessage, ToolMessage, LLMResponse
+from agent.types import (
+    Action, Message, SystemMessage, UserMessage, AssistantMessage, ToolMessage, LLMResponse,
+)
 
 # ── 配置键映射（自然语言 → config.json 字段名） ──
 KEY_MAP = {
@@ -118,14 +121,19 @@ def _parse_intent(text: str) -> dict:
 
 # ── REPL 循环 ──
 
+def _mask_secret(secret: str) -> str:
+    """脱敏展示密钥类配置。"""
+    if not secret:
+        return '(未设置)'
+    if len(secret) <= 10:
+        return '***'
+    return secret[:6] + '*' * (len(secret) - 10) + secret[-4:]
+
+
 def _show_config():
     """显示当前配置。"""
     cfg = load_config()
-    api_key = cfg.get('api_key', '')
-    if api_key:
-        masked = api_key[:6] + '*' * (len(api_key) - 10) + api_key[-4:] if len(api_key) > 10 else '***'
-    else:
-        masked = '(未设置)'
+    masked = _mask_secret(cfg.get('api_key', ''))
     print()
     print(f'  API Key:   {masked}')
     print(f'  Model:     {cfg.get("model", "deepseek-chat")}')
@@ -162,10 +170,114 @@ def _chat_system_prompt(workspace: str) -> str:
 当前工作目录：{workspace}"""
 
 
+def _console_approver(action: Action) -> bool:
+    """batch 模式下 escalate 操作的人工确认。"""
+    args = action.args or {}
+    try:
+        ans = input(f'  ⚡ 危险操作待人工确认: {action.tool}({args})。批准执行? [y/N] ')
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    return ans.strip().lower() in ('y', 'yes')
+
+
+def _repl_handle_action(
+    action: Action,
+    messages: list,
+    tool_registry,
+    memory: FileMemory,
+    mock: bool,
+) -> str:
+    """处理 repl 聊天循环中的单个动作：护栏检查 → 执行 → 结果回灌。
+
+    返回用于 tracer 记录的结果摘要。
+    """
+    if action.type == 'done':
+        answer = action.answer or '完成'
+        print(f'  🎯 {answer}')
+        return answer
+
+    if action.type == 'take_note':
+        key = action.note_key or ''
+        value = action.note_value or ''
+        if key:
+            memory.write(key, value)
+            memory.consolidate()
+        result_text = f'已记录: {key}={value[:50] if value else ""}'
+        print(f'  📝 {key} = {value[:80]}')
+        if action.tool_call_id:
+            messages.append(ToolMessage(content=result_text, tool_call_id=action.tool_call_id))
+        else:
+            messages.append(UserMessage(content=result_text))
+        return result_text
+
+    if action.type != 'call_tool':
+        msg = f'未知动作类型: {action.type}'
+        print(f'  ⚠ {msg}')
+        messages.append(UserMessage(content=msg))
+        return msg
+
+    t_name = action.tool or ''
+    t_args = action.args or {}
+    _print_tool_call(action)
+
+    if mock:
+        print('  ✓ (mock)')
+        if action.tool_call_id:
+            messages.append(ToolMessage(content='(mock)', tool_call_id=action.tool_call_id))
+        return '(mock)'
+
+    # 与 batch 模式一致：工具执行前必须过安全护栏
+    guard_result = guardrail(action)
+    if guard_result.disposition == 'deny':
+        msg = f'安全护栏: {guard_result.reason}'
+        print(f'  ⛔ DENY: {guard_result.reason}')
+        if action.tool_call_id:
+            messages.append(ToolMessage(content=msg, tool_call_id=action.tool_call_id))
+        else:
+            messages.append(UserMessage(content=msg))
+        return f'[DENIED] {guard_result.reason}'
+
+    if guard_result.disposition == 'escalate':
+        try:
+            answer = input(f'  ⚡ {guard_result.reason}，需要人工确认。批准执行? [y/N] ')
+            approved = answer.strip().lower() in ('y', 'yes')
+        except (EOFError, KeyboardInterrupt):
+            approved = False
+            print()
+        if not approved:
+            msg = f'操作被拒绝: {guard_result.reason}'
+            print('  ⛔ ESCALATE DENIED')
+            if action.tool_call_id:
+                messages.append(ToolMessage(content=msg, tool_call_id=action.tool_call_id))
+            else:
+                messages.append(UserMessage(content=msg))
+            return f'[ESCALATED-DENIED] {guard_result.reason}'
+        print('  ⚡ ESCALATE APPROVED')
+
+    try:
+        tr = tool_registry.execute(t_name, t_args)
+    except Exception as e:
+        print(f'  ⚠ {e}')
+        if action.tool_call_id:
+            messages.append(ToolMessage(content=str(e), tool_call_id=action.tool_call_id))
+        return f'[EXC] {e}'
+
+    result_text = tr.data if tr.success else tr.error
+    _print_result(t_name, tr.success, result_text)
+    if action.tool_call_id:
+        messages.append(ToolMessage(content=result_text, tool_call_id=action.tool_call_id))
+    else:
+        messages.append(UserMessage(content=result_text))
+    return result_text
+
+
 def repl(mock: bool = False, max_steps: int = 30):
     """交互式 REPL 主循环 — 持续对话模式。"""
     ensure_config()
     config = load_config()
+    memory = FileMemory(config['memory_path'])
+    tracer = Tracer(config['traces_dir'])
 
     # 初始化 LLM 和工具（对话期间复用）
     if mock:
@@ -188,111 +300,98 @@ def repl(mock: bool = False, max_steps: int = 30):
 
     print('Coding Agent 交互模式（输入 /help 查看命令）')
 
-    while True:
-        try:
-            text = input('\n> ').strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            break
-
-        if not text:
-            continue
-
-        intent = _parse_intent(text)
-
-        if intent['type'] == 'exit':
-            print('  再见！')
-            break
-
-        elif intent['type'] == 'help':
-            _show_help()
-
-        elif intent['type'] == 'show_config':
-            _show_config()
-
-        elif intent['type'] == 'set':
-            cfg_key = intent['key']
-            cfg_value = intent['value']
-            save_config({cfg_key: cfg_value})
-            # 如果 LLM 已初始化，动态更新配置
-            if not mock:
-                llm = OpenAIProvider(
-                    api_key=config['api_key'],
-                    model=config['model'],
-                    base_url=config['api_base'],
-                )
-            display = DISPLAY_NAMES.get(cfg_key, cfg_key)
-            print(f'  ✓ 已更新 {display} = {cfg_value}')
-
-        elif intent['type'] in ('chat', 'run'):
-            # 首次对话时初始化消息
-            if not messages:
-                workspace = config['workspace']
-                messages.append(SystemMessage(content=_chat_system_prompt(workspace)))
-
-            # 添加用户消息
-            chat_text = intent.get('text', '') or intent.get('file', '')
-            messages.append(UserMessage(content=chat_text))
-
-            # 对话循环：LLM → 工具调用 → LLM → ... → 文本回复
-            while True:
-                try:
-                    response: LLMResponse = llm.chat(messages, tools or [])
-                except Exception as e:
-                    print(f'  ⚠ LLM 调用失败: {e}')
-                    break
-
-                if response.message:
-                    messages.append(response.message)
-                    if response.message.content:
-                        print(f'\n{response.message.content}\n')
-
-                action = response.action
-                if action is None:
-                    break
-
-                if action.type == 'done':
-                    print(f'  🎯 {action.answer or "完成"}')
-                    break
-
-                if action.type == 'call_tool':
-                    t_name = action.tool or ''
-                    t_args = action.args or {}
-                    _print_tool_call(action)
-
-                    if mock:
-                        print('  ✓ (mock)')
-                        if action.tool_call_id:
-                            messages.append(ToolMessage(content='(mock)', tool_call_id=action.tool_call_id))
-                        continue
-
-                    try:
-                        tr = tool_registry.execute(t_name, t_args)
-                    except Exception as e:
-                        print(f'  ⚠ {e}')
-                        if action.tool_call_id:
-                            messages.append(ToolMessage(content=str(e), tool_call_id=action.tool_call_id))
-                        continue
-
-                    result_text = tr.data if tr.success else tr.error
-                    _print_result(t_name, tr.success, result_text)
-                    if action.tool_call_id:
-                        messages.append(ToolMessage(content=result_text, tool_call_id=action.tool_call_id))
-                    else:
-                        messages.append(UserMessage(content=result_text))
-                    continue
-
-                if action.type == 'take_note':
-                    key = action.note_key or ''
-                    value = action.note_value or ''
-                    result_text = f'已记录: {key}={value[:50] if value else ""}'
-                    if action.tool_call_id:
-                        messages.append(ToolMessage(content=result_text, tool_call_id=action.tool_call_id))
-                    else:
-                        messages.append(UserMessage(content=result_text))
-                    continue
-
+    try:
+        while True:
+            try:
+                text = input('\n> ').strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
                 break
+
+            if not text:
+                continue
+
+            intent = _parse_intent(text)
+
+            if intent['type'] == 'exit':
+                print('  再见！')
+                break
+
+            elif intent['type'] == 'help':
+                _show_help()
+
+            elif intent['type'] == 'show_config':
+                _show_config()
+
+            elif intent['type'] == 'set':
+                cfg_key = intent['key']
+                cfg_value = intent['value']
+                save_config({cfg_key: cfg_value})
+                # 同步更新内存中的 config，否则本次会话重建 Provider 时仍用旧配置
+                config[cfg_key] = cfg_value
+                # 如果 LLM 已初始化，动态更新配置
+                if not mock:
+                    llm = OpenAIProvider(
+                        api_key=config['api_key'],
+                        model=config['model'],
+                        base_url=config['api_base'],
+                    )
+                display = DISPLAY_NAMES.get(cfg_key, cfg_key)
+                shown = _mask_secret(cfg_value) if cfg_key == 'api_key' else cfg_value
+                print(f'  ✓ 已更新 {display} = {shown}')
+
+            elif intent['type'] in ('chat', 'run'):
+                # 首次对话时初始化消息
+                if not messages:
+                    workspace = config['workspace']
+                    system_prompt = _chat_system_prompt(workspace) + build_memory_block(memory)
+                    messages.append(SystemMessage(content=system_prompt))
+
+                if intent['type'] == 'run':
+                    # /run 读取任务文件内容交给 LLM，而不是把路径字符串发过去
+                    run_file = Path(intent.get('file', ''))
+                    if not run_file.exists():
+                        print(f'  ⚠ 任务文件不存在: {run_file}')
+                        continue
+                    chat_text = run_file.read_text(encoding='utf-8')
+                else:
+                    chat_text = intent.get('text', '')
+                messages.append(UserMessage(content=chat_text))
+
+                # 对话循环：LLM → 工具调用 → LLM → ... → 文本回复
+                step = 0
+                while True:
+                    try:
+                        response: LLMResponse = llm.chat(messages, tools or [])
+                    except Exception as e:
+                        print(f'  ⚠ LLM 调用失败: {e}')
+                        break
+
+                    if response.message:
+                        messages.append(response.message)
+                        if response.message.content:
+                            print(f'\n{response.message.content}\n')
+
+                    if not response.actions:
+                        break
+
+                    # 依次处理本轮全部动作（可能包含并行 tool calls）
+                    any_done = False
+                    for action in response.actions:
+                        step += 1
+                        result_summary = _repl_handle_action(
+                            action, messages,
+                            tool_registry if not mock else None,
+                            memory, mock,
+                        )
+                        tracer.record(step, action, result=result_summary)
+                        if action.type == 'done':
+                            any_done = True
+                            break
+                    if any_done:
+                        break
+    finally:
+        tracer.flush()
 
     print()
 
@@ -326,6 +425,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=30,
         help='最大迭代步数（默认 30）',
+    )
+    parser.add_argument(
+        '--yes',
+        action='store_true',
+        help='自动批准 escalate 级危险操作（无人值守模式，慎用）',
     )
     parser.add_argument(
         '-v', '--version',
@@ -368,6 +472,14 @@ def run(args: argparse.Namespace) -> str:
     tracer = Tracer(config['traces_dir'])
     workspace = config['workspace']
 
+    # escalate 审批策略：--yes 全自动批准；交互终端人工确认；非交互默认拒绝
+    if args.yes:
+        approver = lambda action: True
+    elif sys.stdin.isatty():
+        approver = _console_approver
+    else:
+        approver = None
+
     answer = run_agent(
         goal=goal,
         task_name=args.name,
@@ -376,6 +488,7 @@ def run(args: argparse.Namespace) -> str:
         memory=memory,
         tracer=tracer,
         max_steps=args.max_steps,
+        approver=approver,
         workspace=workspace,
     )
     return answer

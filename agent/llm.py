@@ -2,6 +2,7 @@
 
 import json
 import os
+import time
 from openai import OpenAI
 from agent.types import (
     Message, SystemMessage, UserMessage, AssistantMessage, ToolMessage,
@@ -95,6 +96,8 @@ def parse_tool_call(tc: ToolCall) -> Action:
 class OpenAIProvider:
     """通过 OpenAI 兼容 API 调用 LLM（适用于 DeepSeek / OpenAI / OpenRouter 等）。"""
 
+    MAX_RETRIES = 3  # 单次 chat 的最大尝试次数（含首次）
+
     def __init__(self, api_key: str, model: str = 'deepseek-chat',
                  base_url: str = 'https://api.deepseek.com'):
         # httpx 不支持 SOCKS 代理，自动降级为 HTTP_PROXY/HTTPS_PROXY
@@ -139,41 +142,49 @@ class OpenAIProvider:
         api_messages = self._convert_messages(messages)
         tool_defs = build_tool_definitions(tools)
 
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=api_messages,
-            tools=tool_defs,
-            tool_choice='auto',
-        )
+        # 指数退避重试（1s / 2s），最多 3 次尝试，覆盖网络抖动与限流
+        response = None
+        for attempt in range(1, self.MAX_RETRIES + 1):
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=api_messages,
+                    tools=tool_defs,
+                    tool_choice='auto',
+                )
+                break
+            except Exception as e:
+                if attempt >= self.MAX_RETRIES:
+                    raise
+                delay = 2 ** (attempt - 1)
+                print(f'  ⚠ LLM 调用失败（第 {attempt}/{self.MAX_RETRIES} 次），{delay}s 后重试: {e}')
+                time.sleep(delay)
 
         choice = response.choices[0]
         msg = choice.message
 
         if msg.tool_calls:
-            # 只取第一个 tool call
-            tc_data = msg.tool_calls[0]
-            tc = ToolCall(
-                id=tc_data.id,
-                type='function',
-                function_name=tc_data.function.name,
-                function_arguments=tc_data.function.arguments,
-            )
-            action = parse_tool_call(tc)
-
-            assistant_msg = AssistantMessage(
-                content=msg.content,
-                tool_calls=[
-                    {
-                        'id': tc.id,
-                        'type': 'function',
-                        'function': {
-                            'name': tc.function_name,
-                            'arguments': tc.function_arguments,
-                        },
-                    }
-                ],
-            )
-            return LLMResponse(action=action, message=assistant_msg)
+            # 解析全部 tool call（模型可能一次给出多个并行调用）
+            actions: list[Action] = []
+            tc_dicts = []
+            for tc_data in msg.tool_calls:
+                tc = ToolCall(
+                    id=tc_data.id,
+                    type='function',
+                    function_name=tc_data.function.name,
+                    function_arguments=tc_data.function.arguments,
+                )
+                actions.append(parse_tool_call(tc))
+                tc_dicts.append({
+                    'id': tc.id,
+                    'type': 'function',
+                    'function': {
+                        'name': tc.function_name,
+                        'arguments': tc.function_arguments,
+                    },
+                })
+            assistant_msg = AssistantMessage(content=msg.content, tool_calls=tc_dicts)
+            return LLMResponse(actions=actions, message=assistant_msg)
         else:
             # 纯文本回复
             assistant_msg = AssistantMessage(content=msg.content)
@@ -201,7 +212,7 @@ class MockLLM:
             # 超出预设响应，返回 done
             action = Action(type='done', answer='Mock completed')
             return LLMResponse(
-                action=action,
+                actions=[action],
                 message=AssistantMessage(content=None, tool_calls=[]),
             )
 
@@ -213,12 +224,13 @@ class MockLLM:
         else:
             # Action
             return LLMResponse(
-                action=r,
+                actions=[r],
                 message=AssistantMessage(
                     content=None,
                     tool_calls=[
                         {
-                            'id': f'mock_{self.call_count}',
+                            # 与 Action.tool_call_id 保持一致，保证会话满足工具调用协议
+                            'id': r.tool_call_id or f'mock_{self.call_count}',
                             'type': 'function',
                             'function': {
                                 'name': r.tool or '',

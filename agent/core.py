@@ -38,6 +38,22 @@ def build_system_prompt(workspace: str) -> str:
 当前工作目录：{workspace}"""
 
 
+def build_memory_block(memory: FileMemory | None) -> str:
+    """把已有记忆注入系统提示，形成 take_note 写入 → 上下文检索的闭环。"""
+    if memory is None:
+        return ''
+    entries = [e for e in memory.items() if e.key]
+    if not entries:
+        return ''
+    lines = []
+    for e in entries[:20]:
+        value = (e.value or '').strip()
+        if len(value) > 300:
+            value = value[:300] + '...'
+        lines.append(f'- {e.key}：{value}')
+    return '\n\n已记录的记忆（来自此前会话的 take_note 笔记，供参考）：\n' + '\n'.join(lines)
+
+
 def build_goal_prompt(task_name: str, task_desc: str) -> str:
     return f"""请完成以下编程任务：
 
@@ -93,7 +109,7 @@ def run_agent(
     """运行 Agent Loop，返回完成消息。"""
 
     messages: list[Message] = [
-        SystemMessage(content=build_system_prompt(workspace)),
+        SystemMessage(content=build_system_prompt(workspace) + build_memory_block(memory)),
         UserMessage(content=build_goal_prompt(task_name, goal)),
     ]
 
@@ -125,104 +141,117 @@ def run_agent(
                 if text:
                     print(text)
 
-        # 2. 解析 Action
-        action = response.action
-        if action is None:
-            continue
+        # 2. 依次处理本轮全部动作（模型可能一次给出多个并行 tool call）
+        for action in response.actions:
+            if done:
+                break
 
-        # 3. Guardrail 检查
-        guard = guardrail(action)
-        if guard.disposition == 'deny':
-            msg = f"安全护栏: {guard.reason}"
-            print(f"  ⛔ DENY: {guard.reason}")
-            messages.append(UserMessage(content=msg))
-            tracer.record(steps, action, result=f'[DENIED] {guard.reason}', feedback=msg)
-            continue
+            # 3. Guardrail 检查
+            guard = guardrail(action)
+            if guard.disposition == 'deny':
+                msg = f"安全护栏: {guard.reason}"
+                print(f"  ⛔ DENY: {guard.reason}")
+                # 拦截也必须以 ToolMessage 响应 tool_call，否则会话违反协议、下一轮 API 400
+                if action.tool_call_id:
+                    messages.append(ToolMessage(content=msg, tool_call_id=action.tool_call_id))
+                else:
+                    messages.append(UserMessage(content=msg))
+                tracer.record(steps, action, result=f'[DENIED] {guard.reason}', feedback=msg)
+                continue
 
-        if guard.disposition == 'escalate':
-            if approver:
-                approved = approver(action)
+            if guard.disposition == 'escalate':
+                if approver:
+                    approved = approver(action)
+                else:
+                    approved = False
+
+                if not approved:
+                    msg = f"操作被拒绝: {guard.reason}"
+                    print(f"  ⛔ ESCALATE DENIED: {guard.reason}")
+                    if action.tool_call_id:
+                        messages.append(ToolMessage(content=msg, tool_call_id=action.tool_call_id))
+                    else:
+                        messages.append(UserMessage(content=msg))
+                    tracer.record(steps, action, result=f'[ESCALATED-DENIED] {guard.reason}')
+                    continue
+                print(f"  ⚡ ESCALATE APPROVED: {guard.reason}")
+
+            # 4. 分发执行
+            if action.type == 'done':
+                answer = action.answer or 'Task completed'
+                done = True
+                print(f"  🎯 {answer}")
+                tracer.record(steps, action, result=answer)
+                break
+
+            elif action.type == 'take_note':
+                key = action.note_key or ''
+                value = action.note_value or ''
+                if key:
+                    memory.write(key, value)
+                result_text = f'已记录笔记: {key}={value[:50] if value else ""}'
+                print(f"  📝 {key} = {_truncate(value or '')}")
+                if action.tool_call_id:
+                    messages.append(ToolMessage(content=result_text, tool_call_id=action.tool_call_id))
+                else:
+                    messages.append(UserMessage(content=result_text))
+                tracer.record(steps, action, result=result_text)
+                continue
+
+            elif action.type == 'call_tool':
+                tool_name = action.tool or ''
+                tool_args = action.args or {}
+
+                # 打印工具调用
+                _print_tool_call(action)
+
+                try:
+                    tool_result = tool_registry.execute(tool_name, tool_args)
+                except ValueError as e:
+                    result_text = f'错误: {e}'
+                    print(f"  ⚠ {result_text}")
+                    if action.tool_call_id:
+                        messages.append(ToolMessage(content=result_text, tool_call_id=action.tool_call_id))
+                    else:
+                        messages.append(UserMessage(content=result_text))
+                    tracer.record(steps, action, result=result_text)
+                    continue
+                except Exception as e:
+                    result_text = f'工具执行异常: {e}'
+                    print(f"  ⚠ {result_text}")
+                    if action.tool_call_id:
+                        messages.append(ToolMessage(content=result_text, tool_call_id=action.tool_call_id))
+                    else:
+                        messages.append(UserMessage(content=result_text))
+                    tracer.record(steps, action, result=result_text)
+                    continue
+
+                result_text = tool_result.data if tool_result.success else tool_result.error
+                _print_result(tool_name, tool_result.success, result_text)
+
+                # 5. Feedback Injection
+                if action.tool_call_id:
+                    messages.append(ToolMessage(content=result_text, tool_call_id=action.tool_call_id))
+                else:
+                    messages.append(UserMessage(content=result_text))
+
+                feedback = None
+                if not tool_result.success:
+                    if tool_name == 'shell' and '返回码' in (tool_result.error or ''):
+                        feedback = f"命令执行失败（返回码非零），这是出错信息，请参考前面的执行结果修正你的方法后重试。"
+                        messages.append(UserMessage(content=feedback))
+                    elif tool_name in ('read_file', 'write_file'):
+                        feedback = f"文件操作失败，请检查路径是否正确后重试。"
+                        messages.append(UserMessage(content=feedback))
+
+                tracer.record(steps, action, result=result_text, feedback=feedback)
+                continue
+
             else:
-                approved = False
-
-            if not approved:
-                msg = f"{guard.reason}"
-                print(f"  ⛔ ESCALATE DENIED: {guard.reason}")
+                msg = f'未知动作类型: {action.type}'
+                print(f"  ⚠ {msg}")
                 messages.append(UserMessage(content=msg))
-                tracer.record(steps, action, result=f'[ESCALATED-DENIED] {guard.reason}')
-                continue
-            print(f"  ⚡ ESCALATE APPROVED: {guard.reason}")
-
-        # 4. 分发执行
-        if action.type == 'done':
-            answer = action.answer or 'Task completed'
-            done = True
-            print(f"  🎯 {answer}")
-            tracer.record(steps, action, result=answer)
-            break
-
-        elif action.type == 'take_note':
-            key = action.note_key or ''
-            value = action.note_value or ''
-            if key:
-                memory.write(key, value)
-            result_text = f'已记录笔记: {key}={value[:50] if value else ""}'
-            print(f"  📝 {key} = {_truncate(value or '')}")
-            if action.tool_call_id:
-                messages.append(ToolMessage(content=result_text, tool_call_id=action.tool_call_id))
-            else:
-                messages.append(UserMessage(content=result_text))
-            tracer.record(steps, action, result=result_text)
-            continue
-
-        elif action.type == 'call_tool':
-            tool_name = action.tool or ''
-            tool_args = action.args or {}
-
-            # 打印工具调用
-            _print_tool_call(action)
-
-            try:
-                tool_result = tool_registry.execute(tool_name, tool_args)
-            except ValueError as e:
-                result_text = f'错误: {e}'
-                print(f"  ⚠ {result_text}")
-                messages.append(UserMessage(content=result_text))
-                tracer.record(steps, action, result=result_text)
-                continue
-            except Exception as e:
-                result_text = f'工具执行异常: {e}'
-                print(f"  ⚠ {result_text}")
-                messages.append(UserMessage(content=result_text))
-                tracer.record(steps, action, result=result_text)
-                continue
-
-            result_text = tool_result.data if tool_result.success else tool_result.error
-            _print_result(tool_name, tool_result.success, result_text)
-
-            # 5. Feedback Injection
-            if action.tool_call_id:
-                messages.append(ToolMessage(content=result_text, tool_call_id=action.tool_call_id))
-            else:
-                messages.append(UserMessage(content=result_text))
-
-            feedback = None
-            if not tool_result.success:
-                if tool_name == 'shell' and '返回码' in (tool_result.error or ''):
-                    feedback = f"命令执行失败（返回码非零），这是出错信息，请参考前面的执行结果修正你的方法后重试。"
-                    messages.append(UserMessage(content=feedback))
-                elif tool_name in ('read_file', 'write_file'):
-                    feedback = f"文件操作失败，请检查路径是否正确后重试。"
-                    messages.append(UserMessage(content=feedback))
-
-            tracer.record(steps, action, result=result_text, feedback=feedback)
-            continue
-
-        else:
-            msg = f'未知动作类型: {action.type}'
-            print(f"  ⚠ {msg}")
-            messages.append(UserMessage(content=msg))
-            tracer.record(steps, action, result=msg)
+                tracer.record(steps, action, result=msg)
 
     # 收尾
     memory.consolidate()

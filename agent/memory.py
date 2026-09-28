@@ -31,6 +31,10 @@ class FileMemory:
         entry = self._entries.get(key)
         return entry.value if entry else None
 
+    def items(self) -> list[MemoryEntry]:
+        """返回全部条目快照（供上下文检索）。"""
+        return list(self._entries.values())
+
     def write(self, key: str, value: str):
         now = datetime.now(timezone.utc).isoformat()
         if key in self._entries:
@@ -47,7 +51,9 @@ class FileMemory:
         """将脏数据写回磁盘。"""
         if not self._dirty:
             return
-        os.makedirs(os.path.dirname(self.file_path), exist_ok=True)
+        parent = os.path.dirname(self.file_path)
+        if parent:  # 裸文件名（无目录前缀）时无需建目录
+            os.makedirs(parent, exist_ok=True)
         data = [
             {
                 'key': e.key,

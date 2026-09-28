@@ -7,6 +7,19 @@ import subprocess
 from agent.types import BaseTool, ToolResult
 
 
+# 单个工具返回给 LLM 的最大字符数，防止一次 cat 大文件撑爆上下文
+MAX_TOOL_OUTPUT = 20000
+
+
+def _clip(text: str) -> str:
+    """过长的工具输出截断并附加说明。"""
+    if not text or len(text) <= MAX_TOOL_OUTPUT:
+        return text
+    return text[:MAX_TOOL_OUTPUT] + (
+        f'\n...[输出过长已截断：原始 {len(text)} 字符，仅保留前 {MAX_TOOL_OUTPUT} 字符]'
+    )
+
+
 # ---- 工具实现 ----
 
 
@@ -29,7 +42,7 @@ class ReadFileTool(BaseTool):
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
-            return ToolResult(success=True, data=content)
+            return ToolResult(success=True, data=_clip(content))
         except FileNotFoundError:
             return ToolResult(success=False, error=f'文件不存在: {file_path}')
         except Exception as e:
@@ -99,11 +112,11 @@ class ShellTool(BaseTool):
                     output += '\n--- stderr ---\n'
                 output += result.stderr
             if result.returncode == 0:
-                return ToolResult(success=True, data=output)
+                return ToolResult(success=True, data=_clip(output))
             else:
                 return ToolResult(
                     success=False,
-                    data=output if output else '',
+                    data=_clip(output) if output else '',
                     error=f'返回码 {result.returncode}',
                 )
         except subprocess.TimeoutExpired:

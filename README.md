@@ -65,8 +65,7 @@ freud --file task.md --mock
 ```
 .
 ├── main.py                 # 入口（兼容），委托给 agent.cli
-├── .env                    # 配置（API Key、模型参数等）
-├── .env.example            # .env 模板
+├── config.json             # 配置（API Key、模型参数等，已被 .gitignore 忽略）
 ├── .gitignore
 ├── pyproject.toml          # 项目元数据与依赖
 ├── README.md
@@ -79,14 +78,15 @@ freud --file task.md --mock
 │   ├── guardrail.py        # 安全护栏：拦截危险 Shell 命令
 │   ├── memory.py           # 文件级持久化 KV 存储
 │   ├── tracer.py           # 可观测性：记录每一步的日志
-│   ├── config.py           # 配置加载（.env → 环境变量）
+│   ├── config.py           # 配置加载（config.json → 环境变量）
 │   └── types.py            # 共享类型定义
 │
 ├── tasks/                  # 智能体生成的解决方案代码（运行时自动创建）
-├── tests/                  # 智能体生成的测试代码（运行时自动创建）
+├── tests/                  # harness 回归/单元测试（18+ 用例，unittest）
 │
 └── docs/
     ├── design.md           # 架构设计文档
+    ├── debug-log-lab2.md   # Lab2 调试与完善记录
     └── thinking-*.md       # 思考过程记录（运行时自动生成）
 ```
 
@@ -188,6 +188,7 @@ freud --file task.md
 | `freud --file task.md --mock` | Mock 模式（无需 API Key，测试流程用） |
 | `freud --mock` | 以 Mock 模式进入 REPL |
 | `freud --max-steps 50 --file task.md` | 自定义最大步数 |
+| `freud --file task.md --yes` | 自动批准 escalate 级危险操作（无人值守） |
 | `freud --help` | 查看帮助 |
 | `freud --version` | 显示版本号 |
 | `uv run python main.py --file task.md` | 兼容方式：通过 python 启动 |
@@ -224,7 +225,10 @@ freud --file my_task.md --name "斐波那契数列"
 
 ## 给使用者的提示
 
-- **不要**把 `.env` 提交到 git（`.gitignore` 已自动忽略）
-- 如需切换模型（如 OpenAI），修改 `.env` 中的 `LLM_MODEL` 和 `LLM_API_BASE`
+- **不要**把 `config.json` 提交到 git（`.gitignore` 已自动忽略，内含 API Key）
+- 如需切换模型（如 OpenAI），修改 `config.json` 中的 `model` 和 `api_base`，或用环境变量 `LLM_MODEL` / `LLM_API_BASE` 覆盖
 - 智能体运行中的每一步日志会保存在 `~/.agent-harness/traces/`
 - 智能体的思考过程会保存在 `docs/thinking-<时间戳>.md`
+- LLM 调用内置指数退避重试（最多 3 次）；单次工具输出超过 20000 字符会自动截断
+- batch 模式下 escalate 级危险操作：交互终端会人工确认，加 `--yes` 自动批准（慎用），非交互环境默认拒绝
+- 调试与完善过程记录见 `docs/debug-log-lab2.md`

@@ -488,3 +488,15 @@ write_thoughts_md() → 保存思考过程到 docs/thinking-*.md
 | 凭证管理 | AES-256-GCM + env fallback | env 为主（SOCKS 代理自动降级） |
 | Mock LLM | 有 | 有（集成在 `llm.py` 中） |
 | 迭代上限 | 50 步 | 30 步（可通过 `--max-steps` 调节） |
+
+## 19. 实现状态备注（2026-09-28 调试完善后）
+
+本节记录实现与上文设计条款的最终对齐状态，调试过程详见 `docs/debug-log-lab2.md`：
+
+- **§4.4 tool call 解析**：已支持一次响应中的**多个并行 tool calls**——全部解析为 Action 列表（`LLMResponse.actions`），逐个经护栏检查后执行，并以各自的 `tool_call_id` 回灌 `ToolMessage`。`LLMResponse.action` 保留为首动作的兼容属性。
+- **§13 错误处理**：LLM API 调用重试已实现（指数退避 1s/2s，最多 3 次尝试）；guardrail 拦截与工具异常均以 ToolMessage 回灌，保证会话协议有效（OpenAI/DeepSeek 强制校验此协议）。
+- **§7 Memory**：写读闭环已补齐——`take_note` 写入的同时，`build_memory_block()` 会把既有记忆注入系统提示（batch 与 REPL 两种模式均生效）。
+- **工具输出**：`read_file` / `shell` 返回超过 `MAX_TOOL_OUTPUT`（20000 字符）时自动截断并附说明，防止上下文溢出。
+- **§6.3 Approver**：batch 模式策略为 `--yes` 自动批准 / 交互终端（isatty）控制台确认 / 非交互默认拒绝；REPL 模式为控制台确认。
+- **REPL 与 batch 同权**：REPL 聊天模式同样执行 guardrail 检查并接入 Tracer（每步记录，退出时 flush）。
+- **测试**：`tests/` 下 26 个 unittest 用例守护上述行为，`.venv/bin/python -m unittest discover -s tests`。

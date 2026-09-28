@@ -123,5 +123,11 @@ class MemoryEntry:
 
 @dataclass
 class LLMResponse:
-    action: Action | None = None
+    """一次 LLM 调用的结果：可能携带零个、一个或多个动作（并行 tool calls）。"""
+    actions: list[Action] = field(default_factory=list)
     message: Message | None = None
+
+    @property
+    def action(self) -> Action | None:
+        """兼容单动作访问：返回第一个动作。"""
+        return self.actions[0] if self.actions else None
