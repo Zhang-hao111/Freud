@@ -10,6 +10,7 @@ from agent.registry import ToolRegistry
 from agent.guardrail import guardrail
 from agent.memory import FileMemory
 from agent.tracer import Tracer
+from agent import ui
 
 
 def build_system_prompt(workspace: str) -> str:
@@ -65,34 +66,14 @@ def build_goal_prompt(task_name: str, task_desc: str) -> str:
 请按照工作流程完成此任务。记住：使用通用算法，不要硬编码测试用例的返回值。"""
 
 
-def _truncate(text: str, max_len: int = 120) -> str:
-    """截断过长的文本用于终端展示。"""
-    if len(text) <= max_len:
-        return text
-    return text[:max_len] + '...'
-
-
 def _print_tool_call(action: Action):
-    """紧凑展示工具调用，类似 Claude Code 风格。"""
-    tool = action.tool or ''
-    args = action.args or {}
-    if tool == 'read_file':
-        print(f"  → read_file(\"{args.get('path', '')}\")")
-    elif tool == 'write_file':
-        path = args.get('path', '')
-        print(f"  → write_file(\"{path}\")")
-    elif tool == 'shell':
-        cmd = args.get('command', '')
-        print(f"  → shell(\"{_truncate(cmd, 100)}\")")
-    else:
-        print(f"  → {tool}({_truncate(str(args))})")
+    """⏺ 工具调用行（Claude Code 风格）。"""
+    print(ui.render_tool_line(action.tool or '', action.args or {}))
 
 
 def _print_result(tool_name: str, success: bool, result_text: str):
-    """紧凑展示工具结果。"""
-    prefix = '✓' if success else '✗'
-    text = _truncate(result_text, 200).replace('\n', ' ')
-    print(f"  {prefix} {text}")
+    """⎿ 结果预览行。"""
+    print(ui.render_result_line(result_text, success))
 
 
 def run_agent(
@@ -128,7 +109,7 @@ def run_agent(
             response: LLMResponse = llm.chat(messages, tools)
         except Exception as e:
             error_msg = f"LLM 调用失败: {e}"
-            print(f"  ⚠ {error_msg}")
+            print(f"  {ui.paint('yellow', '⚠')} {error_msg}")
             messages.append(UserMessage(content=error_msg))
             tracer.record(steps, Action(type='call_tool'), result=error_msg)
             continue
@@ -149,8 +130,9 @@ def run_agent(
             # 3. Guardrail 检查
             guard = guardrail(action)
             if guard.disposition == 'deny':
-                msg = f"安全护栏: {guard.reason}"
-                print(f"  ⛔ DENY: {guard.reason}")
+                msg = f"⛔ 安全护栏: {guard.reason}"
+                print(ui.render_tool_line(action.tool or '', action.args or {}))
+                print(ui.render_result_line(msg, ok=False))
                 # 拦截也必须以 ToolMessage 响应 tool_call，否则会话违反协议、下一轮 API 400
                 if action.tool_call_id:
                     messages.append(ToolMessage(content=msg, tool_call_id=action.tool_call_id))
@@ -167,20 +149,26 @@ def run_agent(
 
                 if not approved:
                     msg = f"操作被拒绝: {guard.reason}"
-                    print(f"  ⛔ ESCALATE DENIED: {guard.reason}")
+                    print(ui.render_tool_line(action.tool or '', action.args or {}))
+                    print(ui.render_result_line(msg, ok=False))
                     if action.tool_call_id:
                         messages.append(ToolMessage(content=msg, tool_call_id=action.tool_call_id))
                     else:
                         messages.append(UserMessage(content=msg))
                     tracer.record(steps, action, result=f'[ESCALATED-DENIED] {guard.reason}')
                     continue
-                print(f"  ⚡ ESCALATE APPROVED: {guard.reason}")
+                print(f"  {ui.paint('yellow', '⚡')} {ui.paint('dim', '已人工批准')}")
 
             # 4. 分发执行
             if action.type == 'done':
                 answer = action.answer or 'Task completed'
                 done = True
-                print(f"  🎯 {answer}")
+                print(f"{ui.dot()} {ui.paint('bold', 'Done')}")
+                for line in answer.splitlines() or ['(无答案)']:
+                    print(f"  {line}")
+                # done 也是一次 tool call，回灌 ToolMessage 保持协议完整
+                if action.tool_call_id:
+                    messages.append(ToolMessage(content=answer, tool_call_id=action.tool_call_id))
                 tracer.record(steps, action, result=answer)
                 break
 
@@ -190,7 +178,8 @@ def run_agent(
                 if key:
                     memory.write(key, value)
                 result_text = f'已记录笔记: {key}={value[:50] if value else ""}'
-                print(f"  📝 {key} = {_truncate(value or '')}")
+                print(f"{ui.dot()} {ui.paint('bold', 'Note')}({key})")
+                print(ui.render_result_line(value or '(空)', True))
                 if action.tool_call_id:
                     messages.append(ToolMessage(content=result_text, tool_call_id=action.tool_call_id))
                 else:
@@ -209,7 +198,7 @@ def run_agent(
                     tool_result = tool_registry.execute(tool_name, tool_args)
                 except ValueError as e:
                     result_text = f'错误: {e}'
-                    print(f"  ⚠ {result_text}")
+                    print(f"  {ui.paint('yellow', '⚠')} {result_text}")
                     if action.tool_call_id:
                         messages.append(ToolMessage(content=result_text, tool_call_id=action.tool_call_id))
                     else:
@@ -218,7 +207,7 @@ def run_agent(
                     continue
                 except Exception as e:
                     result_text = f'工具执行异常: {e}'
-                    print(f"  ⚠ {result_text}")
+                    print(f"  {ui.paint('yellow', '⚠')} {result_text}")
                     if action.tool_call_id:
                         messages.append(ToolMessage(content=result_text, tool_call_id=action.tool_call_id))
                     else:
@@ -249,7 +238,7 @@ def run_agent(
 
             else:
                 msg = f'未知动作类型: {action.type}'
-                print(f"  ⚠ {msg}")
+                print(f"  {ui.paint('yellow', '⚠')} {msg}")
                 messages.append(UserMessage(content=msg))
                 tracer.record(steps, action, result=msg)
 
@@ -259,6 +248,7 @@ def run_agent(
 
     if not done:
         answer = f"达到最大步数 ({max_steps})，任务未完成。"
-        print(f"\n  ⏹ {answer}")
+        print()
+        print(ui.render_result_line(answer, ok=False))
 
     return answer

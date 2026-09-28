@@ -189,6 +189,7 @@ freud --file task.md
 | `freud --mock` | 以 Mock 模式进入 REPL |
 | `freud --max-steps 50 --file task.md` | 自定义最大步数 |
 | `freud --file task.md --yes` | 自动批准 escalate 级危险操作（无人值守） |
+| `freud --resume` | 启动时选择恢复一个历史会话 |
 | `freud --help` | 查看帮助 |
 | `freud --version` | 显示版本号 |
 | `uv run python main.py --file task.md` | 兼容方式：通过 python 启动 |
@@ -205,6 +206,7 @@ freud --file task.md
 | 设置模型 | `/model = gpt-4o` | "把 model 改成 gpt-4o" |
 | 设置 API 地址 | `/base-url = <url>` | "设置 base url 为 ..." |
 | 运行任务 | `/run task.md` | "帮我运行 task.md" |
+| 恢复会话 | `/resume` | "恢复会话" |
 | 帮助 | `/help` | "帮助" |
 | 退出 | `/exit` | "退出" |
 
@@ -230,5 +232,6 @@ freud --file my_task.md --name "斐波那契数列"
 - 智能体运行中的每一步日志会保存在 `~/.agent-harness/traces/`
 - 智能体的思考过程会保存在 `docs/thinking-<时间戳>.md`
 - LLM 调用内置指数退避重试（最多 3 次）；单次工具输出超过 20000 字符会自动截断
+- 每次启动都是全新会话，记忆从零开始；`/resume`（或 `--resume`）可恢复历史会话的 take_note 笔记与对话上下文，会话文件存于 `~/.agent-harness/sessions/`
 - batch 模式下 escalate 级危险操作：交互终端会人工确认，加 `--yes` 自动批准（慎用），非交互环境默认拒绝
 - 调试与完善过程记录见 `docs/debug-log-lab2.md`
