@@ -2,7 +2,7 @@
 
 需求原文见 [迭代一：Agent 驱动的 Hadoop 数据清洗与五维质量评估](../requirements/迭代一_Hadoop数据清洗与Agent基础.md)，项目总体要求与汇报安排见 [项目引言](../requirements/引言_项目总体要求与汇报安排.md)。
 
-逐文件作用、完整数据流、严格验收记录和约 10 分钟视频台本见 [迭代一文件、流程、验收与视频演示指南](files-flow-and-video.md)。
+逐文件作用、完整数据流、严格验收记录和约 10 分钟视频台本见 [迭代一文件、流程、验收与视频演示指南](files-flow-and-video.md)；10 分钟汇报的速览要点（实测数字、讲解话术、时间分配）见 [汇报要点](汇报要点.md)。
 
 ## 运行
 
@@ -35,7 +35,7 @@ uv run freud-governance --host 127.0.0.1 --port 8765
 5. 清洗产物再次上传 HDFS，以完全相同的检查与评分程序复评。根据清洗后有效评分的时间分布，取 80% 和 90% 的时间分位日末分别为 `T1/T2`。若无法形成严格递增的边界，任务失败。
 6. `governance-runs/{task_id}/` 保存 `cleaned/*.dat`、`cleaned/quarantine.jsonl`、`report.json`、`report.md`、中间作业结果与失败信息。HDFS 路径记在报告中。后续迭代应同时核对 `data_version`、`rule_version`、`T1/T2`。
 
-Web 任务在后台运行并逐阶段更新状态。页面展示真实五维分数、数量、异常样例、版本、时间边界与报告下载；追问仅从保存的报告读取，无法回答未验证的事实。
+Web 任务在后台运行并逐阶段更新状态。页面展示真实五维分数、数量、异常样例、版本、时间边界与报告下载；追问优先由大模型基于保存的报告生成，无法回答报告未包含的事实。
 
 ## 评分口径
 
@@ -64,3 +64,13 @@ Hadoop shuffle 不保证同一键下记录的到达顺序。为使同一数据�
 ## 验证与限制
 
 `uv run python -m unittest tests.test_governance -v` 使用含重复、值域错误、孤立引用和冲突的微型数据验证 Streaming 工作脚本。完整端到端实验必须在可用 Hadoop 集群上运行；没有成功的 Hadoop 作业时，不应把本地单元测试当作实际 MovieLens 评分。当前代码不会把未运行的实验值写入报告。
+
+2026-09-29 已在本机 Hadoop 3.4.1 本地模式完成全量端到端运行（1,010,132 条记录，76 秒，任务 `559e89ba341a43cbb212c91e65500fea`），结果与严格验收结论见 files-flow-and-video.md 第 5 节；分布式 HDFS/YARN 仍未验证。
+
+## 本机演示启动（备查）
+
+```bash
+source /home/h/hadoop-env.sh
+cd /home/h/h/大数据分析/Lab-coding-agent
+.venv/bin/python -m governance.web --host 127.0.0.1 --port 8765 --hdfs-root /home/h/hadoop-local-fs/governance
+```
