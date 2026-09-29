@@ -327,7 +327,12 @@ def main():
                                     args.hdfs_root, args.python_command, llm=llm)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"MovieLens 治理页面：http://{args.host}:{args.port}/")
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\n服务已停止；任务产物保留在 governance-runs/ 与 Hadoop 目录中。")
+    finally:
+        server.server_close()
 
 
 if __name__ == "__main__":
