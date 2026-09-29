@@ -69,8 +69,9 @@ Hadoop shuffle 不保证同一键下记录的到达顺序。为使同一数据�
 
 ## 本机演示启动（备查）
 
+Hadoop 环境变量已写入 `~/.bashrc`（`HADOOP_HOME` / `PATH` / `HADOOP_STREAMING_JAR`，`JAVA_HOME` 复用既有 jdk17 配置）。
+
 ```bash
-source /home/h/hadoop-env.sh
 cd /home/h/h/大数据分析/Lab-coding-agent
 .venv/bin/python -m governance.web --host 127.0.0.1 --port 8765 --hdfs-root /home/h/hadoop-local-fs/governance
 ```
