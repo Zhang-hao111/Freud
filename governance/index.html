@@ -97,7 +97,8 @@
     byId('ask').addEventListener('click', async () => {
       try {
         const result = await api(`/api/jobs/${currentTask}/ask`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({question: byId('question').value})});
-        byId('answer').hidden = false; byId('answer').textContent = result.answer;
+        byId('answer').hidden = false;
+        byId('answer').textContent = result.answer + (result.mode === 'llm' ? '\n\n—— 由大模型基于任务报告生成' : '\n\n—— 模板回答，基于任务报告');
       } catch (error) { byId('answer').hidden = false; byId('answer').textContent = error.message; }
     });
   </script>

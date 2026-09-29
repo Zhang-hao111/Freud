@@ -53,7 +53,7 @@
 | `governance/__init__.py` | 标记 `governance` 为 Python 包；不包含业务逻辑。 |
 | `governance/worker.py` | Hadoop Streaming worker。实现三表解析、字段/值域/时间/外键校验、业务键分组、确定性重复处理、清洗动作分类，以及五维评分的 map/combine/reduce。 |
 | `governance/pipeline.py` | 端到端编排器。负责上传、启动 Streaming 作业、合并结果、拆分清洗数据、记录哈希版本、核对记录守恒、生成 `T1/T2`、写 JSON/Markdown 报告，并通过 `HadoopGovernanceTool` 暴露为 Agent 工具。 |
-| `governance/web.py` | Web 服务和受约束的治理 Agent。校验自然语言请求和版本参数，后台执行工具、记录阶段、提供任务/报告/样例/追问 API；追问答案严格来自任务报告。 |
+| `governance/web.py` | Web 服务和受约束的治理 Agent。校验自然语言请求和版本参数，后台执行工具、记录阶段、提供任务/报告/样例/追问 API；追问优先由大模型基于报告摘要生成，失败自动回退确定性模板解释 `explain()`，两种模式都只引用报告事实。 |
 | `governance/index.html` | 无前端框架的单页界面。提交提示词、轮询状态、展示五维变化、处置数量、版本、边界、样例、依据和局限，并提供报告下载与追问输入。 |
 | `agent/types.py` | 提供 `BaseTool` 与 `ToolResult` 通用类型；`HadoopGovernanceTool` 继承和返回这些类型。除此之外，通用 Coding Agent 的 ReAct、终端和文件工具不进入本轮 Web 治理数据流。 |
 
@@ -97,8 +97,8 @@
 ### 3.6 不进入迭代一治理主流程的文件
 
 - `config.json`、`agent/llm.py` 和 PackyAPI/DeepSeek 配置服务于通用 `freud` Coding Agent，不被 `freud-governance` 的 Hadoop 治理 Web 流程读取。
-- 当前治理追问由 `explain()` 根据实际报告组合，不消耗外部模型 Token，也不会把报告或 API Key发送给第三方。
-- 演示时不要打开 `config.json`，不要在终端历史、浏览器地址栏或视频字幕中展示 API Key。
+- 治理追问优先由大模型生成解释：复用实验一的 LLM 接入层（`agent/llm.py`，OpenAI 兼容接口含重试），模型配置读取 `config.json` 或环境变量；`report_digest()` 抽取的报告摘要是唯一事实源，提示词要求报告外信息必须回答"报告中未包含"。API 调用失败或未配置 Key 时自动回退 `explain()` 模板回答，`--no-llm` 可强制模板模式。回答接口附带 `mode` 字段（`llm` / `template`），前端在回答末尾标注来源。
+- 演示时不要打开 `config.json`，不要在终端历史、浏览器地址栏或视频字幕中展示 API Key；报告摘要仅包含任务报告内容，不包含密钥或代码。
 - `docs/design.md`、`docs/debug-log-lab2.md` 主要描述通用 Coding Agent，不是迭代一 Hadoop 验收证据。
 
 ## 4. 完整运行流程
@@ -447,7 +447,7 @@ uv run freud-governance \
 
 **讲解词**：
 
-> 追问不会凭空调用示例答案，而是只读取当前任务的 `report.json`。任务未完成时接口返回 409，不会提前编造分数。可以追问分数、数量、处置样例、未解决问题和版本边界。
+> 追问由大模型基于本次任务的 `report.json` 摘要生成，报告里没有的事实会明确说"报告中未包含"，不会凭空编造；模型不可用时自动回退模板回答。任务未完成时接口返回 409，不会提前生成答案。可以追问分数、数量、处置样例、未解决问题和版本边界。
 
 ### 8:50—9:30：测试与失败态
 

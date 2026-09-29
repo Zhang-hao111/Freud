@@ -8,7 +8,8 @@ import unittest
 from pathlib import Path
 
 from governance.pipeline import HadoopGovernanceTool, HadoopPipeline, cutoff
-from governance.web import Handler, explain
+from governance.web import LLMExplainer, Handler, explain, report_digest
+from agent.types import AssistantMessage, LLMResponse
 
 
 WORKER = Path(__file__).resolve().parent.parent / "governance" / "worker.py"
@@ -125,6 +126,40 @@ class GovernanceWorkerTests(unittest.TestCase):
             with self.subTest(payload=payload):
                 with self.assertRaisesRegex(ValueError, "必须是对象"):
                     self.body_json(payload)
+
+    def test_report_digest_keeps_facts_and_drops_day_distribution(self):
+        report = self.report()
+        digest = report_digest(report)
+        self.assertIn("T1", digest)
+        self.assertIn("scores", digest["before"])
+        self.assertIn("rule_version", digest)
+        self.assertNotIn("days", digest["before"])
+
+    def test_llm_explainer_grounds_on_report_and_falls_back(self):
+        report = self.report()
+
+        class FakeProvider:
+            def __init__(self, behavior):
+                self.behavior, self.messages = behavior, None
+
+            def chat(self, messages, tools, include_done=True, include_take_note=True):
+                self.messages = messages
+                if self.behavior == "raise":
+                    raise RuntimeError("api down")
+                return LLMResponse(message=AssistantMessage(content="依据报告：Unique 75 → 100。"))
+
+        explainer = LLMExplainer.__new__(LLMExplainer)
+        explainer.provider = FakeProvider("ok")
+        self.assertIn("75 → 100", explainer.answer(report, "Unique 为什么变化？"))
+        sent = explainer.provider.messages[0].content
+        self.assertIn("rule_version", sent)
+        self.assertIn("禁止编造", sent)
+        explainer.provider.behavior = "raise"
+        self.assertIsNone(explainer.answer(report, "任意问题"))
+        explainer.provider.behavior = "ok"
+        self.assertIsNone(explainer.answer(report, "   "))
+        explainer.provider = None
+        self.assertIsNone(explainer.answer(report, "任意问题"))
 
     @staticmethod
     def body_json(payload):

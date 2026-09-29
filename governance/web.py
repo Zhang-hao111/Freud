@@ -10,6 +10,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
+from agent.config import load_config
+from agent.llm import OpenAIProvider
+from agent.types import SystemMessage, UserMessage
 from governance.pipeline import HadoopGovernanceTool, HadoopPipeline, RULE_VERSION, SCORE_VERSION
 
 
@@ -25,6 +28,47 @@ ISSUE_LABELS = {
     "duplicate": "完全重复", "conflict": "同一业务键内容冲突",
 }
 ACTION_LABELS = {"repair": "修复", "deduplicate": "去重", "quarantine": "隔离"}
+
+GROUNDING_PROMPT = (
+    "你是 MovieLens 数据治理评估的解释助手。请只依据下方任务报告中的事实回答用户问题："
+    "报告里没有的数据必须回答“报告中未包含该信息”，禁止编造或自行推算数字。"
+    "回答使用中文，简洁分点，可直接引用报告中的具体数字。任务报告 JSON：\n"
+)
+
+
+def report_digest(report):
+    """抽取报告要点作为回答依据；不含逐日分布等大体量字段。"""
+    digest = {key: report[key] for key in
+              ("task_id", "source_version", "data_version", "rule_version", "score_version",
+               "T1", "T2", "actions", "explanation", "method", "limitations",
+               "disposition_examples") if key in report}
+    digest["before"] = {key: report["before"].get(key) for key in ("total", "tables", "issues", "scores")}
+    digest["after"] = {key: report["after"].get(key) for key in ("total", "tables", "issues", "scores")}
+    return digest
+
+
+class LLMExplainer:
+    """大模型追问解释层：报告 JSON 是唯一事实源，模型不可用时返回 None 回退模板回答。"""
+
+    def __init__(self, config):
+        self.provider = None
+        if config.get("api_key"):
+            self.provider = OpenAIProvider(api_key=config["api_key"], model=config["model"],
+                                           base_url=config["api_base"])
+            self.provider.client = self.provider.client.with_options(timeout=30.0)
+            self.provider.MAX_RETRIES = 2
+
+    def answer(self, report, question):
+        if not self.provider or not isinstance(question, str) or not question.strip():
+            return None
+        messages = [SystemMessage(content=GROUNDING_PROMPT + json.dumps(report_digest(report), ensure_ascii=False)),
+                    UserMessage(content=question)]
+        try:
+            response = self.provider.chat(messages, tools=[], include_done=False, include_take_note=False)
+        except Exception as error:
+            print(f"  ⚠ LLM 追问失败，回退模板回答: {error}")
+            return None
+        return response.message.content if response.message else None
 
 
 def explain(report, question):
@@ -103,11 +147,12 @@ def explain(report, question):
 
 
 class GovernanceAgent:
-    def __init__(self, source_dir, output_dir, hadoop, streaming_jar, hdfs_root, python_command):
+    def __init__(self, source_dir, output_dir, hadoop, streaming_jar, hdfs_root, python_command, llm=None):
         self.source_dir = Path(source_dir)
         self.output_dir = Path(output_dir)
         self.settings = dict(hadoop=hadoop, streaming_jar=streaming_jar,
                              hdfs_root=hdfs_root, python_command=python_command)
+        self.llm = llm
         self.jobs = {}
         self.lock = threading.Lock()
 
@@ -206,7 +251,12 @@ class Handler(BaseHTTPRequestHandler):
                 elif job["status"] != "completed":
                     self.send_json({"error": "任务尚未完成，无法依据结果回答"}, 409)
                 else:
-                    self.send_json({"answer": explain(job["report"], data.get("question", ""))})
+                    question = data.get("question", "")
+                    answer = self.agent.llm.answer(job["report"], question) if self.agent.llm else None
+                    mode = "llm" if answer else "template"
+                    if not answer:
+                        answer = explain(job["report"], question)
+                    self.send_json({"answer": answer, "mode": mode})
                 return
             self.send_json({"error": "接口不存在"}, 404)
         except (ValueError, TypeError, UnicodeError) as error:
@@ -262,9 +312,19 @@ def main():
     parser.add_argument("--streaming-jar", default=os.environ.get("HADOOP_STREAMING_JAR"))
     parser.add_argument("--hdfs-root", default=os.environ.get("GOVERNANCE_HDFS_ROOT", "/freud/governance"))
     parser.add_argument("--python-command", default=os.environ.get("HADOOP_PYTHON", "python3"))
+    parser.add_argument("--no-llm", action="store_true", help="追问使用确定性模板回答，不调用大模型")
     args = parser.parse_args()
+    llm = None
+    if not args.no_llm:
+        llm = LLMExplainer(load_config())
+        if llm.provider:
+            print(f"追问解释层：大模型 {llm.provider.model}（失败自动回退模板）")
+        else:
+            print("追问解释层：未配置 API Key，使用确定性模板回答")
+    else:
+        print("追问解释层：--no-llm，使用确定性模板回答")
     Handler.agent = GovernanceAgent(args.source, args.output, args.hadoop, args.streaming_jar,
-                                    args.hdfs_root, args.python_command)
+                                    args.hdfs_root, args.python_command, llm=llm)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"MovieLens 治理页面：http://{args.host}:{args.port}/")
     server.serve_forever()
