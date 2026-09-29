@@ -1,5 +1,7 @@
 # Coding Agent
 
+> 迭代一 MovieLens 1M Hadoop 数据治理代码与网页入口见 [运行与设计说明](docs/iteration1.md)。安装 Hadoop Streaming 后运行 `uv run freud-governance`。
+
 一个通过与大语言模型（LLM）交互，自主完成编程任务的智能体系统。
 
 ## 安装

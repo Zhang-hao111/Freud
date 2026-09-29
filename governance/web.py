@@ -1,0 +1,234 @@
+"""Small web interface and grounded agent for Hadoop governance jobs."""
+
+import argparse
+import json
+import os
+import re
+import threading
+import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import urlparse
+
+from governance.pipeline import HadoopGovernanceTool, HadoopPipeline, RULE_VERSION, SCORE_VERSION
+
+
+ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_SOURCE = ROOT / "ml-1m" / "ml-1m"
+DEFAULT_OUTPUT = ROOT / "governance-runs"
+DIMENSIONS = ("Accurate", "Complete", "Unique", "Up-to-date", "Consistent")
+DIMENSION_ALIASES = {"Accurate": "准确性", "Complete": "完整性", "Unique": "唯一性",
+                     "Up-to-date": "时效性", "Consistent": "一致性"}
+ISSUE_LABELS = {
+    "field_count": "字段数错误", "missing": "必填项缺失", "format": "格式不规范",
+    "domain": "类型或值域错误", "timestamp": "时间范围错误", "reference": "关联实体不存在",
+    "duplicate": "完全重复", "conflict": "同一业务键内容冲突",
+}
+ACTION_LABELS = {"repair": "修复", "deduplicate": "去重", "quarantine": "隔离"}
+
+
+def explain(report, question):
+    if not isinstance(question, str):
+        return "请输入文本问题。"
+    question = question.strip()
+    if not question:
+        return "请输入关于本次任务的具体问题。"
+    before, after = report["before"], report["after"]
+    names = [name for name in DIMENSIONS
+             if name.lower() in question.lower() or DIMENSION_ALIASES[name] in question]
+    if names or any(word in question for word in ("分数", "评分", "提升", "变化")):
+        names = names or DIMENSIONS
+        lines = [f"{name}：{before['scores'][name]} → {after['scores'][name]}；依据：{report['method'][name]}。"
+                 for name in names]
+        if "explanation" in report:
+            lines.append(report["explanation"])
+        return "\n".join(lines)
+    if any(word in question for word in ("异常", "隔离", "删除", "重复", "去重", "修复", "问题")):
+        action = report["actions"]
+        issues = "、".join(f"{ISSUE_LABELS.get(name, name)} {count}" for name, count in sorted(before["issues"].items())) or "未检出规则内异常"
+        answer = (f"清洗前异常标记：{issues}。修复 {action.get('repair', 0)} 条，"
+                  f"去重 {action.get('deduplicate', 0)} 条，隔离 {action.get('quarantine', 0)} 条。"
+                  "同一记录可能有多个异常标记；隔离并不表示已修复。")
+        if any(word in question for word in ("记录", "样例", "例子", "具体", "原因")):
+            examples = report.get("disposition_examples", [])[:5]
+            answer += "\n" + ("\n".join(
+                f"{item['table']}：{item['raw']}；{ACTION_LABELS.get(item['action'], item['action'])}；原因："
+                + "、".join(ISSUE_LABELS.get(issue, issue) for issue in item["issues"])
+                for item in examples) if examples else "报告中没有可展示的处置样例。")
+        return answer
+    if any(word in question for word in ("规则", "依据", "方法", "可信", "局限")):
+        return "\n".join(f"{name}：{value}" for name, value in report["method"].items()) + "\n局限：" + "；".join(report["limitations"])
+    if any(word in question for word in ("版本", "时间", "T1", "T2", "训练", "验证", "测试")):
+        return (f"原始数据版本 {report['source_version']}，清洗版本 {report['data_version']}，"
+                f"规则版本 {report['rule_version']}。T1={report['T1']}，T2={report['T2']}；"
+                "训练期不晚于 T1，验证期为 T1 之后至 T2，测试期在 T2 之后。")
+    return "我只能依据本次实际报告回答分数、异常处置、规则局限和版本时间问题。请具体询问其中一项。"
+
+
+class GovernanceAgent:
+    def __init__(self, source_dir, output_dir, hadoop, streaming_jar, hdfs_root, python_command):
+        self.source_dir = Path(source_dir)
+        self.output_dir = Path(output_dir)
+        self.settings = dict(hadoop=hadoop, streaming_jar=streaming_jar,
+                             hdfs_root=hdfs_root, python_command=python_command)
+        self.jobs = {}
+        self.lock = threading.Lock()
+
+    def start(self, prompt, source_version=None, rule_version=None, score_version=None):
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError("请输入自然语言任务需求")
+        if not any(word in prompt.lower() for word in ("清洗", "评估", "评分", "治理", "movielens", "movie lens")):
+            raise ValueError("当前 Agent 支持 MovieLens 1M 清洗与五维质量评估，请描述相关需求")
+        if re.search(r"自定义|非默认|不用默认|修改.{0,8}规则|修改.{0,8}权重", prompt):
+            raise ValueError("当前只登记了默认清洗及评分方案；请提供已登记的规则版本")
+        if rule_version not in (None, RULE_VERSION) or score_version not in (None, SCORE_VERSION):
+            raise ValueError("请求的清洗或评分规则版本未登记")
+        if source_version is not None and (not isinstance(source_version, str) or not re.fullmatch(r"[0-9a-f]{16}", source_version)):
+            raise ValueError("原始数据版本格式错误")
+        task_id = uuid.uuid4().hex
+        job = {"task_id": task_id, "status": "running", "phase": "准备运行", "prompt": prompt,
+               "source_version": source_version, "rule_version": RULE_VERSION, "score_version": SCORE_VERSION}
+        with self.lock:
+            self.jobs[task_id] = job
+        threading.Thread(target=self._run, args=(task_id,), daemon=True).start()
+        return job.copy()
+
+    def _run(self, task_id):
+        def progress(phase):
+            with self.lock:
+                self.jobs[task_id]["phase"] = phase
+        try:
+            pipeline = HadoopPipeline(self.source_dir, self.output_dir, **self.settings)
+            tool = HadoopGovernanceTool(pipeline, progress, task_id)
+            request = self.get(task_id)
+            result = tool.execute({"rule_version": request["rule_version"],
+                                   "score_version": request["score_version"],
+                                   **({"source_version": request["source_version"]} if request["source_version"] else {})})
+            if not result.success:
+                raise RuntimeError(result.error)
+            report = json.loads(result.data)
+            with self.lock:
+                self.jobs[task_id].update(status="completed", phase="已完成", report=report)
+        except Exception as error:
+            with self.lock:
+                phase = self.jobs[task_id]["phase"]
+                self.jobs[task_id].update(status="failed", phase=f"{phase}失败", error=str(error))
+            failure_dir = self.output_dir / task_id
+            failure_dir.mkdir(parents=True, exist_ok=True)
+            (failure_dir / "failure.json").write_text(json.dumps(
+                {"task_id": task_id, "phase": f"{phase}失败", "error": str(error)}, ensure_ascii=False), encoding="utf-8")
+
+    def get(self, task_id):
+        with self.lock:
+            job = self.jobs.get(task_id)
+            if job:
+                return job.copy()
+        report_path = self.output_dir / task_id / "report.json"
+        if report_path.is_file():
+            return {"task_id": task_id, "status": "completed", "phase": "已完成",
+                    "report": json.loads(report_path.read_text(encoding="utf-8"))}
+        failure_path = self.output_dir / task_id / "failure.json"
+        if failure_path.is_file():
+            return {"status": "failed", **json.loads(failure_path.read_text(encoding="utf-8"))}
+        return None
+
+
+class Handler(BaseHTTPRequestHandler):
+    agent = None
+
+    def send_json(self, payload, status=200):
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def body_json(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0 or length > 65536:
+            raise ValueError("请求内容为空或过大")
+        return json.loads(self.rfile.read(length))
+
+    def do_POST(self):
+        try:
+            path = urlparse(self.path).path
+            data = self.body_json()
+            if path == "/api/jobs":
+                self.send_json(self.agent.start(data.get("prompt"), data.get("source_version"),
+                                                data.get("rule_version"), data.get("score_version")), 202)
+                return
+            match = re.fullmatch(r"/api/jobs/([0-9a-f]{32})/ask", path)
+            if match:
+                job = self.agent.get(match.group(1))
+                if not job:
+                    self.send_json({"error": "任务不存在"}, 404)
+                elif job["status"] != "completed":
+                    self.send_json({"error": "任务尚未完成，无法依据结果回答"}, 409)
+                else:
+                    self.send_json({"answer": explain(job["report"], data.get("question", ""))})
+                return
+            self.send_json({"error": "接口不存在"}, 404)
+        except (ValueError, TypeError, json.JSONDecodeError) as error:
+            self.send_json({"error": str(error)}, 400)
+
+    def do_GET(self):
+        path = urlparse(self.path).path
+        if path == "/":
+            content = Path(__file__).with_name("index.html").read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
+            return
+        match = re.fullmatch(r"/api/jobs/([0-9a-f]{32})(?:/(report|sample))?", path)
+        if not match:
+            self.send_json({"error": "接口不存在"}, 404)
+            return
+        job = self.agent.get(match.group(1))
+        if not job:
+            self.send_json({"error": "任务不存在"}, 404)
+            return
+        kind = match.group(2)
+        if not kind:
+            self.send_json(job)
+            return
+        if job["status"] != "completed":
+            self.send_json({"error": "任务尚未完成"}, 409)
+            return
+        run_dir = self.agent.output_dir / job["report"]["task_id"]
+        if kind == "report":
+            content = (run_dir / "report.md").read_bytes()
+            content_type = "text/markdown; charset=utf-8"
+        else:
+            with open(run_dir / "cleaned" / "ratings.dat", "rb") as source:
+                content = b"".join(source.readline() for _ in range(12)).decode("iso-8859-1").encode("utf-8")
+            content_type = "text/plain; charset=utf-8"
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(content)))
+        self.end_headers()
+        self.wfile.write(content)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="MovieLens Hadoop 数据治理 Agent 网页")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--source", default=str(DEFAULT_SOURCE))
+    parser.add_argument("--output", default=str(DEFAULT_OUTPUT))
+    parser.add_argument("--hadoop", default=os.environ.get("HADOOP_CMD", "hadoop"))
+    parser.add_argument("--streaming-jar", default=os.environ.get("HADOOP_STREAMING_JAR"))
+    parser.add_argument("--hdfs-root", default=os.environ.get("GOVERNANCE_HDFS_ROOT", "/freud/governance"))
+    parser.add_argument("--python-command", default=os.environ.get("HADOOP_PYTHON", "python3"))
+    args = parser.parse_args()
+    Handler.agent = GovernanceAgent(args.source, args.output, args.hadoop, args.streaming_jar,
+                                    args.hdfs_root, args.python_command)
+    server = ThreadingHTTPServer((args.host, args.port), Handler)
+    print(f"MovieLens 治理页面：http://{args.host}:{args.port}/")
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

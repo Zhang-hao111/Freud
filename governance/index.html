@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MovieLens 数据治理 Agent</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: #f5f7fb; color: #1e293b; }
+    body { max-width: 1040px; margin: 0 auto; padding: 28px 18px 70px; }
+    h1 { margin-bottom: 6px; } h2 { margin-top: 0; font-size: 1.16rem; }
+    .muted { color: #64748b; } .card { background: white; border: 1px solid #dbe2ec; border-radius: 14px; padding: 22px; margin: 18px 0; box-shadow: 0 4px 15px #16243a0b; }
+    textarea, input { box-sizing: border-box; width: 100%; padding: 12px; border: 1px solid #bac6d7; border-radius: 8px; font: inherit; }
+    textarea { min-height: 86px; resize: vertical; } button { border: 0; border-radius: 8px; background: #1d4ed8; color: white; padding: 10px 18px; font: inherit; cursor: pointer; margin-top: 10px; }
+    button:disabled { opacity: .5; cursor: default; } .badge { display: inline-block; border-radius: 999px; background: #dbeafe; padding: 5px 12px; margin-bottom: 8px; }
+    .error { color: #b91c1c; } .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; }
+    .metric { border: 1px solid #dbe2ec; border-radius: 10px; padding: 14px; } .metric strong { font-size: 1.3rem; }
+    table { width: 100%; border-collapse: collapse; } th, td { text-align: left; border-bottom: 1px solid #e2e8f0; padding: 9px; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #f1f5f9; border-radius: 8px; padding: 14px; }
+    a { color: #1d4ed8; } [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <h1>MovieLens 数据治理 Agent</h1>
+  <p class="muted">一次请求触发 Hadoop 检查、清洗和五维复评。所有结果来自实际任务。</p>
+  <section class="card">
+    <h2>发起任务</h2>
+    <textarea id="prompt">请使用默认规则清洗 MovieLens 1M，评估清洗前后的 Accurate、Complete、Unique、Up-to-date、Consistent 五个维度，并说明处理了哪些问题、还有哪些问题无法解决。</textarea>
+    <button id="start">开始清洗与评估</button>
+  </section>
+  <section class="card" id="status-card" hidden>
+    <h2>执行情况</h2><span class="badge" id="status"></span>
+    <p id="phase"></p><p class="muted" id="task-id"></p><p class="error" id="error"></p>
+  </section>
+  <main id="results" hidden>
+    <section class="card"><h2>五维评分对比</h2><div class="grid" id="scores"></div></section>
+    <section class="card"><h2>数据处置与版本</h2><div id="counts"></div><p id="explanation"></p><p id="versions"></p><p id="boundaries"></p></section>
+    <section class="card"><h2>评分依据与局限</h2><div id="method"></div><ul id="limitations"></ul></section>
+    <section class="card"><h2>代表性问题与处置</h2><table><thead><tr><th>表</th><th>原始记录</th><th>问题</th><th>处置</th></tr></thead><tbody id="examples"></tbody></table></section>
+    <section class="card"><h2>结果获取</h2><p><a id="report-link" download>下载评估报告</a>　<a id="sample-link" target="_blank">查看清洗后评分样例</a></p><p class="muted">完整清洗数据保存在服务器任务目录的 cleaned/ 下。</p></section>
+    <section class="card"><h2>向 Agent 追问</h2><input id="question" placeholder="例如：为什么唯一性分数变化？隔离了多少记录？"><button id="ask">提问</button><pre id="answer" hidden></pre></section>
+  </main>
+  <script>
+    const byId = id => document.getElementById(id);
+    const issueLabels = {field_count: '字段数错误', missing: '必填项缺失', format: '格式不规范', domain: '类型或值域错误', timestamp: '时间范围错误', reference: '关联实体不存在', duplicate: '完全重复', conflict: '同一业务键内容冲突'};
+    const actionLabels = {repair: '修复', deduplicate: '去重', quarantine: '隔离'};
+    let currentTask = null;
+    async function api(path, options) {
+      const response = await fetch(path, options);
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+      return data;
+    }
+    function textElement(tag, content) { const element = document.createElement(tag); element.textContent = content; return element; }
+    function render(report) {
+      byId('results').hidden = false;
+      byId('scores').replaceChildren();
+      for (const [name, before] of Object.entries(report.before.scores)) {
+        const after = report.after.scores[name];
+        const card = document.createElement('div'); card.className = 'metric';
+        card.append(textElement('div', name), textElement('strong', `${before ?? 'N/A'} → ${after ?? 'N/A'}`), textElement('div', before == null || after == null ? '无法评价' : `变化 ${(after - before).toFixed(4)} 分`));
+        byId('scores').append(card);
+      }
+      byId('counts').textContent = `原始 ${report.before.total} 条，清洗后 ${report.after.total} 条；修复 ${report.actions.repair || 0} 条，去重 ${report.actions.deduplicate || 0} 条，隔离 ${report.actions.quarantine || 0} 条。`;
+      byId('explanation').textContent = report.explanation;
+      byId('versions').textContent = `任务 ${report.task_id} · 原始版本 ${report.source_version} · 清洗版本 ${report.data_version} · 规则 ${report.rule_version}`;
+      byId('boundaries').textContent = `训练截止 T1 ${report.T1}；验证截止 T2 ${report.T2}；测试期在 T2 之后。`;
+      byId('method').replaceChildren();
+      for (const [name, method] of Object.entries(report.method)) byId('method').append(textElement('p', `${name}：${method}`));
+      byId('limitations').replaceChildren(...report.limitations.map(item => textElement('li', item)));
+      byId('examples').replaceChildren();
+      for (const item of report.disposition_examples) {
+        const row = document.createElement('tr');
+        row.append(textElement('td', item.table), textElement('td', item.raw), textElement('td', item.issues.map(issue => issueLabels[issue] || issue).join('、')), textElement('td', actionLabels[item.action] || item.action));
+        byId('examples').append(row);
+      }
+      byId('report-link').href = `/api/jobs/${currentTask}/report`;
+      byId('sample-link').href = `/api/jobs/${currentTask}/sample`;
+    }
+    async function poll() {
+      try {
+        const job = await api(`/api/jobs/${currentTask}`);
+        byId('status').textContent = job.status;
+        byId('phase').textContent = job.phase;
+        byId('error').textContent = job.error || '';
+        if (job.status === 'completed') { byId('start').disabled = false; render(job.report); }
+        else if (job.status === 'failed') byId('start').disabled = false;
+        else setTimeout(poll, 1200);
+      } catch (error) { byId('error').textContent = error.message; byId('start').disabled = false; }
+    }
+    byId('start').addEventListener('click', async () => {
+      byId('start').disabled = true; byId('results').hidden = true; byId('status-card').hidden = false; byId('error').textContent = '';
+      try {
+        const job = await api('/api/jobs', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({prompt: byId('prompt').value})});
+        currentTask = job.task_id; byId('task-id').textContent = `任务标识：${currentTask}`; poll();
+      } catch (error) { byId('error').textContent = error.message; byId('start').disabled = false; }
+    });
+    byId('ask').addEventListener('click', async () => {
+      try {
+        const result = await api(`/api/jobs/${currentTask}/ask`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({question: byId('question').value})});
+        byId('answer').hidden = false; byId('answer').textContent = result.answer;
+      } catch (error) { byId('answer').hidden = false; byId('answer').textContent = error.message; }
+    });
+  </script>
+</body>
+</html>

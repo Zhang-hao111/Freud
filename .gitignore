@@ -9,6 +9,8 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+governance-runs/
+ml-1m/
 
 # 项目说明
 CLAUDE.md
