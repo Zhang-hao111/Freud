@@ -1,6 +1,8 @@
 # 迭代一：MovieLens 1M Hadoop 数据治理
 
-逐文件作用、完整数据流、严格验收记录和约 10 分钟视频台本见 [迭代一文件、流程、验收与视频演示指南](iteration1-files-flow-and-video.md)。
+需求原文见 [迭代一：Agent 驱动的 Hadoop 数据清洗与五维质量评估](../requirements/迭代一_Hadoop数据清洗与Agent基础.md)，项目总体要求与汇报安排见 [项目引言](../requirements/引言_项目总体要求与汇报安排.md)。
+
+逐文件作用、完整数据流、严格验收记录和约 10 分钟视频台本见 [迭代一文件、流程、验收与视频演示指南](files-flow-and-video.md)。
 
 ## 运行
 

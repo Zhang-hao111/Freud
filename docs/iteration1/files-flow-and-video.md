@@ -40,9 +40,9 @@
 
 | 文件 | 迭代一中的作用 |
 | --- | --- |
-| `迭代一_Hadoop数据清洗与Agent基础.md` | 迭代一的需求原文，是功能、展示、可信度和验收范围的最高依据。 |
-| `引言_项目总体要求与汇报安排.md` | 给出三轮迭代的衔接要求、MovieLens 1M 数据说明、提交内容和约 10 分钟汇报要求；迭代一需要固定后续使用的数据版本与 `T1/T2`。 |
-| `README.md` | 仓库总入口；顶部链接到迭代一运行说明并给出 `freud-governance` 启动入口。其余 Coding Agent 内容不是本轮数据治理主流程。 |
+| `docs/requirements/迭代一_Hadoop数据清洗与Agent基础.md` | 迭代一的需求原文，是功能、展示、可信度和验收范围的最高依据。 |
+| `docs/requirements/引言_项目总体要求与汇报安排.md` | 给出三轮迭代的衔接要求、MovieLens 1M 数据说明、提交内容和约 10 分钟汇报要求；迭代一需要固定后续使用的数据版本与 `T1/T2`。 |
+| `README.md` | 仓库总入口，只介绍 Freud 项目的作用、依赖、配置与通用操作方式，不承载迭代一专项说明。 |
 | `pyproject.toml` | 声明 Python 版本、安装依赖、打包范围和 `freud-governance = governance.web:main` 命令；同时把 `governance/index.html` 打进安装包。 |
 | `.gitignore` | 忽略 `config.json`、运行报告目录等本地敏感或运行期文件，避免 API Key 和大量产物被误提交。 |
 
@@ -62,8 +62,8 @@
 | 文件 | 迭代一中的作用 |
 | --- | --- |
 | `tests/test_governance.py` | 迭代一专项回归测试。覆盖检查、清洗、评分、冲突、确定性去重、隔离文件语义、Hadoop 失败、时间边界、追问分流和 JSON 请求契约。 |
-| `docs/iteration1.md` | 精简的部署、数据流、评分口径、调研依据和限制说明，适合运行人员快速查阅。 |
-| `docs/iteration1-files-flow-and-video.md` | 本文；负责逐文件说明、严格验收记录和视频演示脚本。 |
+| `docs/iteration1/README.md` | 精简的部署、数据流、评分口径、调研依据和限制说明，也是迭代一文档入口。 |
+| `docs/iteration1/files-flow-and-video.md` | 本文；负责逐文件说明、严格验收记录和视频演示脚本。 |
 
 ### 3.4 原始数据文件
 
@@ -363,7 +363,7 @@ uv run freud-governance \
 
 ### 0:00—0:40：范围、目标与诚实声明
 
-**画面**：打开 `迭代一_Hadoop数据清洗与Agent基础.md` 的目标段，再切到治理首页。
+**画面**：打开 `docs/requirements/迭代一_Hadoop数据清洗与Agent基础.md` 的目标段，再切到治理首页。
 
 **讲解词**：
 
