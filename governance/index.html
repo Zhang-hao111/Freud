@@ -62,7 +62,7 @@
       }
       byId('counts').textContent = `原始 ${report.before.total} 条，清洗后 ${report.after.total} 条；修复 ${report.actions.repair || 0} 条，去重 ${report.actions.deduplicate || 0} 条，隔离 ${report.actions.quarantine || 0} 条。`;
       byId('explanation').textContent = report.explanation;
-      byId('versions').textContent = `任务 ${report.task_id} · 原始版本 ${report.source_version} · 清洗版本 ${report.data_version} · 规则 ${report.rule_version}`;
+      byId('versions').textContent = `任务 ${report.task_id} · 原始版本 ${report.source_version} · 清洗版本 ${report.data_version} · 清洗规则 ${report.rule_version} · 评分规则 ${report.score_version}`;
       byId('boundaries').textContent = `训练截止 T1 ${report.T1}；验证截止 T2 ${report.T2}；测试期在 T2 之后。`;
       byId('method').replaceChildren();
       for (const [name, method] of Object.entries(report.method)) byId('method').append(textElement('p', `${name}：${method}`));

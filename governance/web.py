@@ -34,35 +34,72 @@ def explain(report, question):
     if not question:
         return "请输入关于本次任务的具体问题。"
     before, after = report["before"], report["after"]
+    lowered = question.lower()
     names = [name for name in DIMENSIONS
-             if name.lower() in question.lower() or DIMENSION_ALIASES[name] in question]
-    if names or any(word in question for word in ("分数", "评分", "提升", "变化")):
+             if name.lower() in lowered or DIMENSION_ALIASES[name] in question]
+    remaining_intent = any(word in question for word in
+                           ("未解决", "剩余", "仍存在", "还有哪些", "清洗后异常"))
+    volume_intent = any(word in question for word in ("数据量", "记录数", "总数", "数量"))
+    method_intent = any(word in question for word in ("依据", "方法", "口径")) or (
+        "规则" in question and "版本" not in question)
+    limitation_intent = any(word in question for word in ("局限", "可信", "未验证", "无法验证"))
+    version_intent = any(word in question for word in
+                         ("版本", "时间", "T1", "T2", "训练期", "验证期", "测试期"))
+    example_intent = any(word in question for word in ("记录", "样例", "例子", "具体", "原因"))
+    disposition_intent = any(word in question for word in
+                             ("异常", "隔离", "删除", "重复", "去重", "修复")) or (
+        "问题" in question and not remaining_intent)
+    score_intent = bool(names) or any(word in question for word in ("分数", "提升")) or (
+        "评分" in question and not method_intent and not version_intent) or (
+        "变化" in question and not volume_intent and not disposition_intent and not remaining_intent)
+    sections = []
+    if remaining_intent:
+        remaining = "、".join(
+            f"{ISSUE_LABELS.get(name, name)} {count}"
+            for name, count in sorted(after.get("issues", {}).items()))
+        sections.append("清洗后规则内仍检出：" + remaining + "。" if remaining else "清洗后规则内未检出异常。")
+        if report.get("limitations"):
+            sections.append("仍无法自动验证或解决：" + "；".join(report["limitations"]))
+    if volume_intent:
+        action = report["actions"]
+        delta = after["total"] - before["total"]
+        sections.append(
+            f"原始 {before['total']} 条，清洗后 {after['total']} 条，变化 {delta:+d} 条；"
+            f"修复 {action.get('repair', 0)} 条、去重 {action.get('deduplicate', 0)} 条、"
+            f"隔离 {action.get('quarantine', 0)} 条。隔离和去重会改变评分分母。")
+    if score_intent:
         names = names or DIMENSIONS
         lines = [f"{name}：{before['scores'][name]} → {after['scores'][name]}；依据：{report['method'][name]}。"
                  for name in names]
         if "explanation" in report:
             lines.append(report["explanation"])
-        return "\n".join(lines)
-    if any(word in question for word in ("异常", "隔离", "删除", "重复", "去重", "修复", "问题")):
+        sections.append("\n".join(lines))
+    if disposition_intent and not remaining_intent:
         action = report["actions"]
         issues = "、".join(f"{ISSUE_LABELS.get(name, name)} {count}" for name, count in sorted(before["issues"].items())) or "未检出规则内异常"
         answer = (f"清洗前异常标记：{issues}。修复 {action.get('repair', 0)} 条，"
                   f"去重 {action.get('deduplicate', 0)} 条，隔离 {action.get('quarantine', 0)} 条。"
                   "同一记录可能有多个异常标记；隔离并不表示已修复。")
-        if any(word in question for word in ("记录", "样例", "例子", "具体", "原因")):
+        if example_intent:
             examples = report.get("disposition_examples", [])[:5]
             answer += "\n" + ("\n".join(
                 f"{item['table']}：{item['raw']}；{ACTION_LABELS.get(item['action'], item['action'])}；原因："
                 + "、".join(ISSUE_LABELS.get(issue, issue) for issue in item["issues"])
                 for item in examples) if examples else "报告中没有可展示的处置样例。")
-        return answer
-    if any(word in question for word in ("规则", "依据", "方法", "可信", "局限")):
-        return "\n".join(f"{name}：{value}" for name, value in report["method"].items()) + "\n局限：" + "；".join(report["limitations"])
-    if any(word in question for word in ("版本", "时间", "T1", "T2", "训练", "验证", "测试")):
-        return (f"原始数据版本 {report['source_version']}，清洗版本 {report['data_version']}，"
-                f"规则版本 {report['rule_version']}。T1={report['T1']}，T2={report['T2']}；"
-                "训练期不晚于 T1，验证期为 T1 之后至 T2，测试期在 T2 之后。")
-    return "我只能依据本次实际报告回答分数、异常处置、规则局限和版本时间问题。请具体询问其中一项。"
+        sections.append(answer)
+    if method_intent:
+        sections.append("评分依据：\n" + "\n".join(
+            f"{name}：{value}" for name, value in report["method"].items()))
+    if limitation_intent and not remaining_intent:
+        sections.append("评价局限：" + "；".join(report["limitations"]))
+    if version_intent:
+        sections.append(
+            f"原始数据版本 {report['source_version']}，清洗版本 {report['data_version']}，"
+            f"规则版本 {report['rule_version']}，评分版本 {report.get('score_version', '未登记')}。"
+            f"T1={report['T1']}，T2={report['T2']}；"
+            "训练期不晚于 T1，验证期为 T1 之后至 T2，测试期在 T2 之后。")
+    return "\n".join(sections) if sections else (
+        "我只能依据本次实际报告回答分数、异常处置、规则局限和版本时间问题。请具体询问其中一项。")
 
 
 class GovernanceAgent:
@@ -148,7 +185,10 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         if length <= 0 or length > 65536:
             raise ValueError("请求内容为空或过大")
-        return json.loads(self.rfile.read(length))
+        data = json.loads(self.rfile.read(length))
+        if not isinstance(data, dict):
+            raise ValueError("请求 JSON 必须是对象")
+        return data
 
     def do_POST(self):
         try:
@@ -169,7 +209,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json({"answer": explain(job["report"], data.get("question", ""))})
                 return
             self.send_json({"error": "接口不存在"}, 404)
-        except (ValueError, TypeError, json.JSONDecodeError) as error:
+        except (ValueError, TypeError, UnicodeError) as error:
             self.send_json({"error": str(error)}, 400)
 
     def do_GET(self):

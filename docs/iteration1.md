@@ -1,5 +1,7 @@
 # 迭代一：MovieLens 1M Hadoop 数据治理
 
+逐文件作用、完整数据流、严格验收记录和约 10 分钟视频台本见 [迭代一文件、流程、验收与视频演示指南](iteration1-files-flow-and-video.md)。
+
 ## 运行
 
 需要 Python 3.11+、可访问 HDFS 的 Hadoop 3 集群、Hadoop Streaming jar，以及集群工作节点上的 `python3`。运行环境必须能执行 `hadoop fs` 和 `hadoop jar`。原始数据不随源码分发；将 GroupLens 的 `users.dat`、`movies.dat`、`ratings.dat` 原样放在 `ml-1m/ml-1m/`，保留 ISO-8859-1 编码与无表头格式。
@@ -50,9 +52,12 @@ Web 任务在后台运行并逐阶段更新状态。页面展示真实五维分�
 ## 设计调研
 
 - [Apache Hadoop Streaming](https://hadoop.apache.org/docs/stable/hadoop-streaming/HadoopStreaming.html)（[源码仓库](https://github.com/apache/hadoop)）：使用标准输入输出的 mapper/reducer、`-files` 分发工作脚本及关联文件、`mapreduce.job.reduces=0` 运行清洗映射；实际评分和处置均在 Hadoop 作业中执行。
-- [Deequ](https://github.com/awslabs/deequ)：借鉴其显式定义完整性、唯一性和值域检查并保留行级异常的思路。这里选择 Hadoop Streaming 实现，以满足本轮指定的执行平台。
-- [Great Expectations](https://github.com/fivetran/great_expectations)：借鉴可解释的验证结果与自动生成文档；报告同时保存规则、计数、样例和未验证范围。
+- [Deequ](https://github.com/awslabs/deequ)：借鉴其显式定义完整性、唯一性和值域检查、结构化验证结果及行级通过/失败证据的思路。这里选择 Hadoop Streaming 实现，以满足本轮指定的执行平台。
+- [Great Expectations](https://github.com/fivetran/great_expectations)：借鉴可解释的验证结果与自动生成文档；报告同时保存规则、计数、样例和未验证范围，Agent 追问按这些结构化结果组合回答。
+- [Soda Core](https://github.com/sodadata/soda-core)：借鉴数据契约与入口校验思路；Web API 明确要求 JSON 对象，未登记配置和错误载荷在任务执行前失败。
 - [OpenLineage](https://github.com/OpenLineage/OpenLineage)：借鉴 `run/job/dataset` 的可追溯标识；每次运行保留任务 ID、原始与清洗数据哈希、规则版本、HDFS 路径和时间边界。
+
+Hadoop shuffle 不保证同一键下记录的到达顺序。为使同一数据版本和规则版本产生稳定的处置统计，reducer 会按异常严重程度、异常集合、规范值和原始值确定性排序，优先保留问题最少的规范记录，再将其余同值记录标记为重复。
 
 ## 验证与限制
 

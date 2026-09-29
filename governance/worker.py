@@ -16,6 +16,7 @@ MIN_TIME = 946684800
 MAX_TIME = 1046476799
 RECENT_TIME = 1014854400
 DIMENSIONS = ("Accurate", "Complete", "Unique", "Up-to-date", "Consistent")
+CRITICAL_ISSUES = {"field_count", "missing", "domain", "timestamp", "reference", "conflict"}
 
 
 def reference_ids():
@@ -104,7 +105,14 @@ def emit_group(group):
         return
     values = {record["value"] for record in group}
     conflict = len(values) > 1 and not any(record["value"] is None for record in group)
-    for index, record in enumerate(group):
+    ordered = sorted(group, key=lambda record: (
+        len(set(record["issues"]) & CRITICAL_ISSUES),
+        len(record["issues"]),
+        tuple(sorted(record["issues"])),
+        record["value"] or "",
+        record["raw"],
+    ))
+    for index, record in enumerate(ordered):
         issues = set(record["issues"])
         if conflict:
             issues.add("conflict")
@@ -128,7 +136,6 @@ def audit_reduce():
 
 def clean_map():
     references = reference_ids()
-    critical = {"field_count", "missing", "domain", "timestamp", "reference", "conflict"}
     for line in sys.stdin:
         record = json.loads(line)
         issues = set(record["issues"])
@@ -137,7 +144,7 @@ def clean_map():
             user_id, movie_id = map(int, record["value"].split("::")[:2])
             if user_id not in references["users"] or movie_id not in references["movies"]:
                 issues.add("reference")
-        if issues & critical:
+        if issues & CRITICAL_ISSUES:
             action = "quarantine"
         elif "duplicate" in issues:
             action = "deduplicate"

@@ -103,7 +103,7 @@ class HadoopPipeline:
                     counts[action] += 1
                     if action in {"keep", "repair"}:
                         handles[record["table"]].write(record["value"] + "\n")
-                    elif quarantine:
+                    elif action == "quarantine" and quarantine:
                         quarantine.write(json.dumps(record, ensure_ascii=False) + "\n")
         finally:
             for handle in handles.values():
