@@ -6,15 +6,16 @@ Freud 是一个运行在终端中的轻量级 AI 编程助手。它将兼容 Ope
 
 ## 主要能力
 
-- 交互式终端会话和单次任务文件两种运行方式；
+- 交互式终端会话和单次任务文件两种运行方式，共用同一个 Agent 执行引擎；
 - 支持 OpenAI 兼容的 Chat Completions API；
-- 内置文件读取、文件写入和 Shell 命令工具；
+- 内置文件读写、精确编辑、内容搜索、路径匹配和 Shell 命令等工具，可按环境扩展；
 - 基于工具结果循环规划和执行任务；
 - 对危险命令进行允许、拒绝或人工确认分类；
-- 支持询问确认、自动接受编辑和无人值守三种权限模式；
+- 支持询问确认、自动接受编辑和无人值守三种权限模式（REPL 内 Shift+Tab 或 `--mode` 切换）；
 - 保存会话、笔记和消息历史，可在后续恢复；
 - 保存结构化执行轨迹，便于调试和复盘；
-- 提供不需要 API Key 的 Mock 模式用于测试流程。
+- 提供不需要 API Key 的 Mock 模式用于测试流程；
+- 附带基于 Hadoop Streaming 的 MovieLens 1M 数据治理模块，治理任务可作为 Agent 工具被调用。
 
 ## 运行依赖
 
@@ -149,6 +150,21 @@ freud --resume
 
 会话文件默认保存在 `~/.agent-harness/sessions/`。每个新任务默认创建独立会话，不会自动继承其他会话的上下文。
 
+## 内置工具
+
+Agent 注册表默认包含以下工具，交互模式与任务文件模式通用：
+
+| 工具 | 作用 |
+| --- | --- |
+| `read_file` | 读取文件内容（超长自动截断） |
+| `write_file` | 写入文件，自动创建父目录 |
+| `edit_file` | 对已有文件做精确字符串替换，要求匹配唯一或显式 `replace_all` |
+| `grep` | 正则搜索文件内容，目录递归，支持文件名过滤与大小写开关 |
+| `glob` | 按 glob 模式匹配文件路径，`*` 可兼作列目录 |
+| `shell` | 执行 Shell 命令 |
+
+在安装了 Hadoop 的机器上（`hadoop` 命令可用且设置了 `HADOOP_STREAMING_JAR`），启动时会额外注册数据治理工具 `submit_governance_job` / `get_governance_job`；环境缺失时自动跳过，不影响其他功能。
+
 ## 权限与安全
 
 Freud 对工具操作提供三种权限模式，可在交互界面中使用 `Shift+Tab` 切换：
@@ -159,13 +175,16 @@ Freud 对工具操作提供三种权限模式，可在交互界面中使用 `Shi
 | `accept edits on` | 自动允许普通编辑 | 仍按安全规则处理 |
 | `yolo - auto approve` | 自动允许 | 自动批准需要升级确认的操作，谨慎使用 |
 
-批处理模式可以使用 `--yes` 自动批准需要确认的命令：
+任务文件模式通过 `--mode` 选择权限档位：
 
 ```bash
-freud --file task.md --yes
+freud --file task.md --mode ask      # 默认：文件修改逐次确认，非交互环境直接拒绝
+freud --file task.md --mode accept   # 允许编辑，高风险命令仍按安全规则
+freud --file task.md --mode yolo     # 全部自动批准
+freud --file task.md --yes           # 等价 --mode yolo
 ```
 
-该选项适合受控的无人值守环境，不建议在包含重要文件或广泛系统权限的工作区中使用。安全护栏明确拒绝的命令不会因为 `--yes` 而绕过。
+无人值守适合受控环境，不建议在包含重要文件或广泛系统权限的工作区中使用。安全护栏明确拒绝（deny）的命令任何模式都不会绕过。
 
 ## 执行流程
 
@@ -177,6 +196,22 @@ freud --file task.md --yes
 4. 执行文件或 Shell 工具；
 5. 将真实工具结果反馈给模型；
 6. 继续执行，直到完成、失败或达到最大步数。
+
+## 数据治理模块
+
+`governance/` 是一个独立的迭代一交付：基于 Hadoop Streaming 的 MovieLens 1M 数据清洗与五维质量评估（准确性、完整性、唯一性、时效性、一致性）。整个流程由多个 MapReduce 作业组成——清洗前检查与评分、两轮清洗、复评、对账校验——最终产出带版本哈希的 JSON/Markdown 报告，报告 JSON 是唯一事实源。
+
+两种使用方式：
+
+```bash
+# 独立 Web 服务（自然语言提交任务 + 大模型追问解释层，失败自动回退模板）
+export HADOOP_STREAMING_JAR=/path/to/hadoop-streaming-3.x.x.jar
+uv run freud-governance --source ml-1m/ml-1m --output governance-runs
+
+# 或在 Agent 对话中作为工具调用：submit_governance_job 提交，get_governance_job 轮询
+```
+
+环境要求：`hadoop` 命令在 PATH 中、`HADOOP_STREAMING_JAR` 指向 Streaming jar、数据集 ml-1m（ISO-8859-1 原版，不随源码分发）放在 `ml-1m/ml-1m`。设计取舍、全量实测记录与演示流程见 `docs/iteration1/`。
 
 ## 数据与日志
 
@@ -191,7 +226,8 @@ freud --file task.md --yes
 
 ```text
 .
-├── agent/          # Agent 循环、模型接口、工具、权限、会话和终端界面
+├── agent/          # Agent 引擎、模型接口、工具、权限、会话和终端界面
+├── governance/     # MovieLens 1M 数据治理模块（Hadoop Streaming）
 ├── docs/           # 需求、设计和使用文档
 ├── tasks/          # 任务描述及任务产物
 ├── tests/          # 单元测试和回归测试
@@ -205,6 +241,8 @@ freud --file task.md --yes
 运行全部测试：
 
 ```bash
+uv run python -m pytest tests/ -v
+# 或
 uv run python -m unittest discover -s tests -v
 ```
 
@@ -223,5 +261,6 @@ freud --help
 | `--max-steps N` | 设置最大 Agent 步数 |
 | `--mock` | 使用 Mock LLM |
 | `--resume` | 选择并恢复历史会话 |
-| `--yes` | 自动批准需要确认的高风险操作 |
+| `--yes` | 自动批准需要确认的高风险操作（等价 `--mode yolo`） |
+| `--mode MODE` | 权限模式：ask / accept / yolo，默认 ask |
 | `--version` | 显示版本号 |
