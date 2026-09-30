@@ -8,6 +8,7 @@ from agent.types import (
 )
 from agent.registry import ToolRegistry
 from agent.guardrail import guardrail
+from agent.permissions import MODES, auto_approve_escalate, needs_confirm
 from agent.memory import FileMemory
 from agent.tracer import Tracer
 from agent import ui
@@ -88,9 +89,19 @@ def run_agent(
     tracer: Tracer,
     max_steps: int = 30,
     approver: Callable[[Action], bool] | None = None,
+    confirmer: Callable[[Action], bool] | None = None,
+    mode: str = 'ask',
     workspace: str = '.',
 ) -> str:
-    """运行 Agent Loop，返回完成消息。"""
+    """运行 Agent Loop，返回完成消息。
+
+    mode 为三档权限模式（见 agent.permissions），与 REPL 共用同一套判定：
+    ask 下文件改动需经 confirmer 确认（无 confirmer 可问则直接拒绝），
+    yolo 自动批准 escalate 与文件改动。approver 仅在 mode 非 yolo 时
+    用于 escalate 级命令的人工确认。
+    """
+    if mode not in MODES:
+        raise ValueError(f"未知权限模式: {mode}，可选 {'/'.join(MODES)}")
 
     messages: list[Message] = [
         SystemMessage(content=build_system_prompt(workspace) + build_memory_block(memory)),
@@ -145,7 +156,10 @@ def run_agent(
                 continue
 
             if guard.disposition == 'escalate':
-                if approver:
+                if auto_approve_escalate(mode):
+                    approved = True
+                    print(f"  {ui.paint('yellow', '⚡')} {ui.paint('dim', 'yolo 模式自动批准')}")
+                elif approver:
                     approved = approver(action)
                 else:
                     approved = False
@@ -160,7 +174,33 @@ def run_agent(
                         messages.append(UserMessage(content=msg))
                     tracer.record(steps, action, result=f'[ESCALATED-DENIED] {guard.reason}')
                     continue
-                print(f"  {ui.paint('yellow', '⚡')} {ui.paint('dim', '已人工批准')}")
+                if not auto_approve_escalate(mode):
+                    print(f"  {ui.paint('yellow', '⚡')} {ui.paint('dim', '已人工批准')}")
+
+            # ask 模式：文件改动执行前必须确认（REPL 传 confirmer；非交互 batch 无 confirmer 则拒绝）
+            if needs_confirm(mode, action.tool or ''):
+                target = (action.args or {}).get('path', '')
+                if confirmer:
+                    if not confirmer(action):
+                        msg = f'用户拒绝本次文件修改: {target}'
+                        print(ui.render_result_line(msg, ok=False))
+                        if action.tool_call_id:
+                            messages.append(ToolMessage(content=msg, tool_call_id=action.tool_call_id))
+                        else:
+                            messages.append(UserMessage(content=msg))
+                        tracer.record(steps, action, result=f'[USER-DENIED] {target}', feedback=msg)
+                        continue
+                else:
+                    msg = ('ask 模式下文件修改需人工确认，当前无法询问；'
+                           '无人值守请使用 --yes（等价 yolo）或 --mode accept/yolo')
+                    print(ui.render_tool_line(action.tool or '', action.args or {}))
+                    print(ui.render_result_line(msg, ok=False))
+                    if action.tool_call_id:
+                        messages.append(ToolMessage(content=msg, tool_call_id=action.tool_call_id))
+                    else:
+                        messages.append(UserMessage(content=msg))
+                    tracer.record(steps, action, result='[CONFIRM-UNAVAILABLE]', feedback=msg)
+                    continue
 
             # 4. 分发执行
             if action.type == 'done':

@@ -237,10 +237,10 @@ def _chat_system_prompt(workspace: str) -> str:
 
 
 def _console_approver(action: Action) -> bool:
-    """batch 模式下 escalate 操作的人工确认。"""
+    """batch 模式下 escalate 操作与文件改动的人工确认。"""
     args = action.args or {}
     try:
-        ans = input(f'  ⚡ 危险操作待人工确认: {action.tool}({args})。批准执行? [y/N] ')
+        ans = input(f'  ⚡ 操作待人工确认: {action.tool}({args})。批准执行? [y/N] ')
     except (EOFError, KeyboardInterrupt):
         print()
         return False
@@ -335,9 +335,10 @@ def _repl_handle_action(
 
     # ask 模式：文件改动前逐次确认（'a' 可切换为本会话自动允许编辑）
     if state is not None and needs_confirm(state.get('mode', 'ask'), t_name):
+        verb = '写入' if t_name == 'write_file' else '编辑'
         write_path = t_args.get('path', '')
         try:
-            ans = input(f"  ⚡ 将写入文件 {write_path}，允许? [y/N/a] ").strip().lower()
+            ans = input(f"  ⚡ 将{verb}文件 {write_path}，允许? [y/N/a] ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             ans = ''
             print()
@@ -345,7 +346,7 @@ def _repl_handle_action(
             state['mode'] = 'accept'
             print(f"  {ui.paint('green', '✓')} {chip('accept')[0]} — 本会话后续编辑自动允许")
         elif ans != 'y':
-            msg = f'用户拒绝本次写入: {write_path}'
+            msg = f'用户拒绝本次{verb}: {write_path}'
             print(ui.render_result_line(msg, ok=False))
             if action.tool_call_id:
                 messages.append(ToolMessage(content=msg, tool_call_id=action.tool_call_id))
@@ -598,7 +599,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         '--yes',
         action='store_true',
-        help='自动批准 escalate 级危险操作（无人值守模式，慎用）',
+        help='自动批准所有操作（等价 --mode yolo，无人值守慎用）',
+    )
+    parser.add_argument(
+        '--mode',
+        choices=('ask', 'accept', 'yolo'),
+        default=None,
+        help='权限模式：ask 文件改动逐次确认（默认）/ accept 允许编辑 / yolo 全部自动',
     )
     parser.add_argument(
         '--resume',
@@ -652,13 +659,10 @@ def run(args: argparse.Namespace) -> str:
     memory = SessionMemory(session)
     tracer = Tracer(config['traces_dir'])
 
-    # escalate 审批策略：--yes 全自动批准；交互终端人工确认；非交互默认拒绝
-    if args.yes:
-        approver = lambda action: True
-    elif sys.stdin.isatty():
-        approver = _console_approver
-    else:
-        approver = None
+    # 权限模式：--mode 显式指定；--yes 等价 yolo；默认 ask（交互终端确认，非交互拒绝文件修改）
+    mode = args.mode or ('yolo' if args.yes else 'ask')
+    confirmer = _console_approver if sys.stdin.isatty() else None
+    approver = confirmer if mode != 'yolo' else None
 
     answer = run_agent(
         goal=goal,
@@ -669,6 +673,8 @@ def run(args: argparse.Namespace) -> str:
         tracer=tracer,
         max_steps=args.max_steps,
         approver=approver,
+        confirmer=confirmer,
+        mode=mode,
         workspace=workspace,
     )
     session.save()
