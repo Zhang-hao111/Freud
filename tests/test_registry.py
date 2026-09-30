@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent.registry import EditFileTool, GrepTool, create_default_registry
+from agent.registry import EditFileTool, GlobTool, GrepTool, create_default_registry
 
 
 class EditFileToolTests(unittest.TestCase):
@@ -97,6 +97,44 @@ class GrepToolTests(unittest.TestCase):
     def test_default_registry_contains_new_tools(self):
         names = {tool.name for tool in create_default_registry().list()}
         self.assertLessEqual({"read_file", "write_file", "edit_file", "grep", "shell"}, names)
+
+
+class GlobToolTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.directory = Path(self.temporary.name)
+        (self.directory / "app.py").write_text("x = 1\n", encoding="utf-8")
+        (self.directory / "README.md").write_text("# readme\n", encoding="utf-8")
+        (self.directory / "pkg" / "deep").mkdir(parents=True)
+        (self.directory / "pkg" / "deep" / "core.py").write_text("y = 2\n", encoding="utf-8")
+        (self.directory / ".git").mkdir()
+        (self.directory / ".git" / "config.py").write_text("z = 3\n", encoding="utf-8")
+
+    def test_double_star_finds_nested_and_skips_git(self):
+        result = GlobTool().execute({"pattern": "**/*.py", "path": str(self.directory)})
+        self.assertTrue(result.success, result.error)
+        self.assertIn("app.py", result.data)
+        self.assertIn("pkg/deep/core.py", result.data)
+        self.assertNotIn(".git", result.data)
+
+    def test_star_lists_directory_and_marks_dirs(self):
+        result = GlobTool().execute({"pattern": "*", "path": str(self.directory)})
+        self.assertTrue(result.success, result.error)
+        self.assertIn("app.py", result.data)
+        self.assertIn("pkg/", result.data)
+        self.assertIn("README.md", result.data)
+
+    def test_no_match_and_missing_dir(self):
+        empty = GlobTool().execute({"pattern": "*.xyz", "path": str(self.directory)})
+        self.assertEqual(empty.data, "未找到匹配的文件")
+        missing = GlobTool().execute({"pattern": "*.py", "path": str(self.directory / "nope")})
+        self.assertFalse(missing.success)
+        self.assertIn("目录不存在", missing.error)
+
+    def test_default_registry_contains_new_tools(self):
+        names = {tool.name for tool in create_default_registry().list()}
+        self.assertLessEqual({"read_file", "write_file", "edit_file", "grep", "glob", "shell"}, names)
 
 
 if __name__ == "__main__":

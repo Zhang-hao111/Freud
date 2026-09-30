@@ -20,6 +20,7 @@ def build_system_prompt(workspace: str) -> str:
 - write_file: 写入文件内容（自动创建父目录）
 - edit_file: 对已有文件做精确字符串替换，改动局部时优先用它
 - grep: 用正则搜索文件内容
+- glob: 按 glob 模式查找文件路径
 - shell: 执行 Shell 命令
 
 你的工作流程：

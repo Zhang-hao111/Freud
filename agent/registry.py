@@ -1,6 +1,7 @@
 """工具系统 — read_file / write_file / shell 以及 ToolRegistry。"""
 
 import fnmatch
+import glob
 import os
 import re
 import subprocess
@@ -249,6 +250,48 @@ class GrepTool(BaseTool):
         return ToolResult(success=True, data='\n'.join(matches))
 
 
+GLOB_MAX_RESULTS = 500
+
+
+class GlobTool(BaseTool):
+    name = 'glob'
+    description = '按 glob 模式匹配文件路径并返回列表，支持 ** 递归；pattern 用 * 可当列目录用，目录项以 / 结尾'
+    parameters = {
+        'type': 'object',
+        'properties': {
+            'pattern': {'type': 'string', 'description': 'glob 模式，如 src/**/*.py、*.md、*'},
+            'path': {'type': 'string', 'description': '搜索根目录，默认当前目录'},
+        },
+        'required': ['pattern'],
+    }
+
+    def execute(self, args: dict) -> ToolResult:
+        pattern = args.get('pattern')
+        if not isinstance(pattern, str) or not pattern.strip():
+            return ToolResult(success=False, error='缺少 pattern 参数')
+        raw = args.get('path', '.') if isinstance(args.get('path'), str) else '.'
+        base = os.path.abspath(raw)
+        if not os.path.isdir(base):
+            return ToolResult(success=False, error=f'目录不存在: {base}')
+        try:
+            found = glob.glob(pattern, root_dir=base, recursive=True)
+        except (ValueError, NotImplementedError) as e:
+            return ToolResult(success=False, error=f'无效的 glob 模式: {e}')
+        results = []
+        for rel in sorted(found):
+            parts = rel.replace('\\', '/').split('/')
+            if any(part in GREP_SKIP_DIRS for part in parts):
+                continue
+            full = os.path.join(base, rel)
+            display = rel.replace(os.sep, '/')
+            results.append(display + ('/' if os.path.isdir(full) else ''))
+        if not results:
+            return ToolResult(success=True, data='未找到匹配的文件')
+        if len(results) > GLOB_MAX_RESULTS:
+            results = results[:GLOB_MAX_RESULTS] + [f'...[结果已截断，共 {len(results)}+ 项，请用更精确的 pattern]']
+        return ToolResult(success=True, data='\n'.join(results))
+
+
 # ---- 工具注册表 ----
 
 
@@ -283,5 +326,6 @@ def create_default_registry(shell_timeout: int = 30) -> ToolRegistry:
     registry.register(WriteFileTool())
     registry.register(EditFileTool())
     registry.register(GrepTool())
+    registry.register(GlobTool())
     registry.register(ShellTool(timeout=shell_timeout))
     return registry
