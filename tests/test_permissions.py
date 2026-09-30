@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent.core import run_agent
+from agent.core import run_task
 from agent.memory import FileMemory
 from agent.permissions import MODES, auto_approve_escalate, cycle, needs_confirm
 from agent.registry import ToolRegistry
@@ -73,7 +73,7 @@ class RunAgentModeTest(unittest.TestCase):
         shell = RecordingShell()
         registry.register(shell)
         llm = ScriptedLLM(responses)
-        answer = run_agent(goal='g', task_name='t', llm=llm,
+        answer = run_task(goal='g', task_name='t', llm=llm,
                            tool_registry=registry,
                            memory=FileMemory(f'{tmp}/m.json'),
                            tracer=Tracer(f'{tmp}/traces'),
@@ -111,7 +111,7 @@ class RunAgentModeTest(unittest.TestCase):
                 LLMResponse(actions=[_done()]),
             ])
             from agent.registry import create_default_registry
-            run_agent(goal='g', task_name='t', llm=llm2,
+            run_task(goal='g', task_name='t', llm=llm2,
                       tool_registry=create_default_registry(),
                       memory=FileMemory(f'{tmp}/m2.json'),
                       tracer=Tracer(f'{tmp}/traces2'),
@@ -127,7 +127,7 @@ class RunAgentModeTest(unittest.TestCase):
                 LLMResponse(actions=[_call('write_file', {'path': str(target), 'content': 'data'})]),
                 LLMResponse(actions=[_done()]),
             ])
-            run_agent(goal='g', task_name='t', llm=llm,
+            run_task(goal='g', task_name='t', llm=llm,
                       tool_registry=create_default_registry(),
                       memory=FileMemory(f'{tmp}/m.json'),
                       tracer=Tracer(f'{tmp}/traces'),
