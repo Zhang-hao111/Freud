@@ -32,6 +32,22 @@ class ConfigPathTest(unittest.TestCase):
                     self.assertTrue(found.exists())
 
 
+class EnsureConfigTest(unittest.TestCase):
+    def test_first_run_creates_missing_home_dir(self):
+        """首跑且 ~/.agent-harness 不存在时应自动建目录，而不是 write_text 崩溃。"""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_home = Path(tmp) / 'home'
+            with mock.patch.object(Path, 'home', return_value=fake_home), \
+                 mock.patch.object(config, '_find_config', return_value=None):
+                cfg = config.ensure_config()
+            self.assertEqual(cfg, fake_home / config.GLOBAL_CONFIG_DIR / config.CONFIG_FILENAME)
+            self.assertTrue(cfg.is_file())
+            # 配置已存在时直接返回，不重写
+            with mock.patch.object(Path, 'home', return_value=fake_home):
+                self.assertEqual(config.ensure_config(), cfg)
+
+
 def tempfile_temporary_chdir():
     import contextlib, os, tempfile
 
