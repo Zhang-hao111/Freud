@@ -4,11 +4,15 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
-from governance.pipeline import HadoopGovernanceTool, HadoopPipeline, cutoff
+from governance.pipeline import HadoopGovernanceTool, HadoopPipeline, RULE_VERSION, SCORE_VERSION, cutoff
 from governance.web import LLMExplainer, Handler, explain, report_digest
+from governance.jobs import JobManager
+from governance.tools import GetGovernanceJobTool, SubmitGovernanceJobTool, register_governance_tools
+from agent.registry import ToolRegistry
 from agent.types import AssistantMessage, LLMResponse
 
 
@@ -188,6 +192,110 @@ class GovernanceWorkerTests(unittest.TestCase):
             "T2": "2000-02-01T23:59:59Z",
             "disposition_examples": [],
         }
+
+
+class FakePipeline:
+    """测试替身：不碰 Hadoop，按 HadoopPipeline.run 的契约产出报告并落盘。"""
+
+    def __init__(self, source_dir, output_dir, **settings):
+        self.source_dir, self.output_dir, self.settings = source_dir, output_dir, settings
+
+    def run(self, on_progress=None, task_id=None, expected_source_version=None):
+        if expected_source_version and expected_source_version != "0123456789abcdef":
+            raise ValueError(f"原始数据版本不匹配：请求 {expected_source_version}，实际 0123456789abcdef")
+        if on_progress:
+            on_progress("上传原始数据")
+        report = {
+            "task_id": task_id, "rule_version": RULE_VERSION, "score_version": SCORE_VERSION,
+            "T1": "2003-01-01T23:59:59Z", "T2": "2003-02-01T23:59:59Z",
+            "actions": {"repair": 1, "deduplicate": 0, "quarantine": 0},
+            "explanation": "测试说明", "method": {"Accurate": "口径"}, "limitations": ["测试局限"],
+            "disposition_examples": [], "days": {"2002-01-01": 1},
+            "before": {"total": 3, "tables": {"ratings": 3}, "issues": {"duplicate": 1},
+                       "scores": {"Accurate": 66.6667}},
+            "after": {"total": 2, "tables": {"ratings": 2}, "issues": {}, "scores": {"Accurate": 100.0}},
+        }
+        run_dir = self.output_dir / task_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "report.json").write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
+        (run_dir / "report.md").write_text("# 测试报告\n", encoding="utf-8")
+        return report
+
+
+class ExplodingPipeline:
+    def __init__(self, source_dir, output_dir, **settings):
+        pass
+
+    def run(self, on_progress=None, task_id=None, expected_source_version=None):
+        raise RuntimeError("模拟 Hadoop 失败")
+
+
+class GovernanceAgentToolsTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.directory = Path(self.temporary.name)
+        self.manager = JobManager(self.directory / "source", self.directory / "runs",
+                                  pipeline_factory=FakePipeline)
+
+    def wait_for(self, manager, task_id, timeout=5.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            state = manager.get(task_id)
+            if state and state["status"] != "running":
+                return state
+            time.sleep(0.02)
+        self.fail("任务在超时前未结束")
+
+    def test_job_runs_in_background_and_persists_report(self):
+        job = self.manager.submit()
+        final = self.wait_for(self.manager, job["task_id"])
+        self.assertEqual(final["status"], "completed")
+        self.assertEqual(final["phase"], "已完成")
+        self.assertTrue((self.directory / "runs" / job["task_id"] / "report.md").is_file())
+
+    def test_get_tool_returns_digest_without_day_distribution(self):
+        submitted = self.manager.submit()
+        self.wait_for(self.manager, submitted["task_id"])
+        result = GetGovernanceJobTool(self.manager).execute({"task_id": submitted["task_id"]})
+        self.assertTrue(result.success, result.error)
+        payload = json.loads(result.data)
+        self.assertEqual(payload["status"], "completed")
+        self.assertNotIn("days", payload["report"])
+        self.assertIn("scores", payload["report"]["before"])
+        self.assertTrue(Path(payload["report_path"]).is_file())
+
+    def test_submit_tool_rejects_bad_source_version(self):
+        result = SubmitGovernanceJobTool(self.manager).execute({"source_version": "not-hex"})
+        self.assertFalse(result.success)
+        self.assertIn("版本格式错误", result.error)
+
+    def test_get_tool_rejects_unknown_task(self):
+        result = GetGovernanceJobTool(self.manager).execute({"task_id": "a" * 32})
+        self.assertFalse(result.success)
+        self.assertIn("任务不存在", result.error)
+
+    def test_failure_is_recorded_on_disk(self):
+        manager = JobManager(self.directory / "source2", self.directory / "runs2",
+                             pipeline_factory=ExplodingPipeline)
+        job = manager.submit()
+        state = self.wait_for(manager, job["task_id"])
+        self.assertEqual(state["status"], "failed")
+        self.assertIn("模拟 Hadoop 失败", state["error"])
+        failure = json.loads((self.directory / "runs2" / job["task_id"] / "failure.json")
+                             .read_text(encoding="utf-8"))
+        self.assertEqual(failure["phase"], "准备运行失败")
+
+    def test_registration_skipped_without_hadoop_and_added_with_it(self):
+        registry = ToolRegistry()
+        self.assertEqual(register_governance_tools(
+            registry, self.directory, self.directory,
+            hadoop="freud-no-such-hadoop", streaming_jar="stub.jar"), [])
+        self.assertEqual(registry.list(), [])
+        names = register_governance_tools(registry, self.directory, self.directory,
+                                          hadoop=sys.executable, streaming_jar="stub.jar")
+        self.assertEqual(names, ["submit_governance_job", "get_governance_job"])
+        self.assertEqual({tool.name for tool in registry.list()}, set(names))
 
 
 if __name__ == "__main__":

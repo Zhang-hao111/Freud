@@ -13,6 +13,18 @@ from agent import term, ui
 from agent.llm import OpenAIProvider, MockLLM
 from agent.permissions import auto_approve_escalate, chip, cycle, needs_confirm
 from agent.registry import create_default_registry
+
+
+def _attach_governance_tools(tool_registry):
+    """Hadoop 环境可用时追加 MovieLens 治理工具；环境缺失则跳过，主 agent 不受影响。"""
+    try:
+        from governance.jobs import DEFAULT_OUTPUT, DEFAULT_SOURCE
+        from governance.tools import register_governance_tools
+        registered = register_governance_tools(tool_registry, DEFAULT_SOURCE, DEFAULT_OUTPUT)
+        if registered:
+            print(f'[+] 治理工具已注册: {", ".join(registered)}')
+    except Exception as error:
+        print(f'[!] 治理工具未启用: {error}')
 from agent.session import DEFAULT_TITLE, Session, SessionStore, SessionMemory, time_ago
 from agent.tracer import Tracer
 from agent.types import (
@@ -397,6 +409,7 @@ def repl(mock: bool = False, max_steps: int = 30, resume: bool = False):
             base_url=config['api_base'],
         )
         tool_registry = create_default_registry(shell_timeout=config['shell_timeout'])
+        _attach_governance_tools(tool_registry)
         tools = tool_registry.list()
 
     # 新会话：记忆从零开始
@@ -626,6 +639,7 @@ def run(args: argparse.Namespace) -> str:
         sys.exit(1)
 
     tool_registry = create_default_registry(shell_timeout=config['shell_timeout'])
+    _attach_governance_tools(tool_registry)
     workspace = config['workspace']
 
     # batch 模式：每次任务运行也是一个独立会话

@@ -4,8 +4,6 @@ import argparse
 import json
 import os
 import re
-import threading
-import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
@@ -13,12 +11,8 @@ from urllib.parse import urlparse
 from agent.config import load_config
 from agent.llm import OpenAIProvider
 from agent.types import SystemMessage, UserMessage
-from governance.pipeline import HadoopGovernanceTool, HadoopPipeline, RULE_VERSION, SCORE_VERSION
-
-
-ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_SOURCE = ROOT / "ml-1m" / "ml-1m"
-DEFAULT_OUTPUT = ROOT / "governance-runs"
+from governance.jobs import (DEFAULT_OUTPUT, DEFAULT_SOURCE, JobManager,
+                             RULE_VERSION, SCORE_VERSION, report_digest)
 DIMENSIONS = ("Accurate", "Complete", "Unique", "Up-to-date", "Consistent")
 DIMENSION_ALIASES = {"Accurate": "准确性", "Complete": "完整性", "Unique": "唯一性",
                      "Up-to-date": "时效性", "Consistent": "一致性"}
@@ -34,17 +28,6 @@ GROUNDING_PROMPT = (
     "报告里没有的数据必须回答“报告中未包含该信息”，禁止编造或自行推算数字。"
     "回答使用中文，简洁分点，可直接引用报告中的具体数字。任务报告 JSON：\n"
 )
-
-
-def report_digest(report):
-    """抽取报告要点作为回答依据；不含逐日分布等大体量字段。"""
-    digest = {key: report[key] for key in
-              ("task_id", "source_version", "data_version", "rule_version", "score_version",
-               "T1", "T2", "actions", "explanation", "method", "limitations",
-               "disposition_examples") if key in report}
-    digest["before"] = {key: report["before"].get(key) for key in ("total", "tables", "issues", "scores")}
-    digest["after"] = {key: report["after"].get(key) for key in ("total", "tables", "issues", "scores")}
-    return digest
 
 
 class LLMExplainer:
@@ -148,13 +131,10 @@ def explain(report, question):
 
 class GovernanceAgent:
     def __init__(self, source_dir, output_dir, hadoop, streaming_jar, hdfs_root, python_command, llm=None):
-        self.source_dir = Path(source_dir)
-        self.output_dir = Path(output_dir)
-        self.settings = dict(hadoop=hadoop, streaming_jar=streaming_jar,
-                             hdfs_root=hdfs_root, python_command=python_command)
+        self.jobs = JobManager(source_dir, output_dir, hadoop=hadoop, streaming_jar=streaming_jar,
+                               hdfs_root=hdfs_root, python_command=python_command)
+        self.output_dir = self.jobs.output_dir
         self.llm = llm
-        self.jobs = {}
-        self.lock = threading.Lock()
 
     def start(self, prompt, source_version=None, rule_version=None, score_version=None):
         if not isinstance(prompt, str) or not prompt.strip():
@@ -163,56 +143,11 @@ class GovernanceAgent:
             raise ValueError("当前 Agent 支持 MovieLens 1M 清洗与五维质量评估，请描述相关需求")
         if re.search(r"自定义|非默认|不用默认|修改.{0,8}规则|修改.{0,8}权重", prompt):
             raise ValueError("当前只登记了默认清洗及评分方案；请提供已登记的规则版本")
-        if rule_version not in (None, RULE_VERSION) or score_version not in (None, SCORE_VERSION):
-            raise ValueError("请求的清洗或评分规则版本未登记")
-        if source_version is not None and (not isinstance(source_version, str) or not re.fullmatch(r"[0-9a-f]{16}", source_version)):
-            raise ValueError("原始数据版本格式错误")
-        task_id = uuid.uuid4().hex
-        job = {"task_id": task_id, "status": "running", "phase": "准备运行", "prompt": prompt,
-               "source_version": source_version, "rule_version": RULE_VERSION, "score_version": SCORE_VERSION}
-        with self.lock:
-            self.jobs[task_id] = job
-        threading.Thread(target=self._run, args=(task_id,), daemon=True).start()
-        return job.copy()
-
-    def _run(self, task_id):
-        def progress(phase):
-            with self.lock:
-                self.jobs[task_id]["phase"] = phase
-        try:
-            pipeline = HadoopPipeline(self.source_dir, self.output_dir, **self.settings)
-            tool = HadoopGovernanceTool(pipeline, progress, task_id)
-            request = self.get(task_id)
-            result = tool.execute({"rule_version": request["rule_version"],
-                                   "score_version": request["score_version"],
-                                   **({"source_version": request["source_version"]} if request["source_version"] else {})})
-            if not result.success:
-                raise RuntimeError(result.error)
-            report = json.loads(result.data)
-            with self.lock:
-                self.jobs[task_id].update(status="completed", phase="已完成", report=report)
-        except Exception as error:
-            with self.lock:
-                phase = self.jobs[task_id]["phase"]
-                self.jobs[task_id].update(status="failed", phase=f"{phase}失败", error=str(error))
-            failure_dir = self.output_dir / task_id
-            failure_dir.mkdir(parents=True, exist_ok=True)
-            (failure_dir / "failure.json").write_text(json.dumps(
-                {"task_id": task_id, "phase": f"{phase}失败", "error": str(error)}, ensure_ascii=False), encoding="utf-8")
+        return self.jobs.submit(prompt=prompt, source_version=source_version,
+                                rule_version=rule_version, score_version=score_version)
 
     def get(self, task_id):
-        with self.lock:
-            job = self.jobs.get(task_id)
-            if job:
-                return job.copy()
-        report_path = self.output_dir / task_id / "report.json"
-        if report_path.is_file():
-            return {"task_id": task_id, "status": "completed", "phase": "已完成",
-                    "report": json.loads(report_path.read_text(encoding="utf-8"))}
-        failure_path = self.output_dir / task_id / "failure.json"
-        if failure_path.is_file():
-            return {"status": "failed", **json.loads(failure_path.read_text(encoding="utf-8"))}
-        return None
+        return self.jobs.get(task_id)
 
 
 class Handler(BaseHTTPRequestHandler):
