@@ -225,6 +225,8 @@ def _chat_system_prompt(workspace: str) -> str:
     return f"""你是一个 AI 助手，擅长编程和命令行操作。你可以与用户自由对话，也可以在需要时使用以下工具：
 - read_file: 读取文件内容
 - write_file: 写入文件内容（自动创建父目录）
+- edit_file: 对已有文件做精确字符串替换，改动局部时优先用它
+- grep: 用正则搜索文件内容
 - shell: 执行 Shell 命令
 
 如果用户只是打招呼或闲聊，正常回应即可，不用调用工具。

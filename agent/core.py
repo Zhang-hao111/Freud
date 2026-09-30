@@ -18,6 +18,8 @@ def build_system_prompt(workspace: str) -> str:
 你有以下工具可用：
 - read_file: 读取文件内容
 - write_file: 写入文件内容（自动创建父目录）
+- edit_file: 对已有文件做精确字符串替换，改动局部时优先用它
+- grep: 用正则搜索文件内容
 - shell: 执行 Shell 命令
 
 你的工作流程：
@@ -229,7 +231,7 @@ def run_agent(
                     if tool_name == 'shell' and '返回码' in (tool_result.error or ''):
                         feedback = f"命令执行失败（返回码非零），这是出错信息，请参考前面的执行结果修正你的方法后重试。"
                         messages.append(UserMessage(content=feedback))
-                    elif tool_name in ('read_file', 'write_file'):
+                    elif tool_name in ('read_file', 'write_file', 'edit_file'):
                         feedback = f"文件操作失败，请检查路径是否正确后重试。"
                         messages.append(UserMessage(content=feedback))
 
