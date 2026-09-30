@@ -12,7 +12,7 @@ from agent.llm import OpenAIProvider
 from agent.types import (
     Action, AssistantMessage, ToolMessage, SystemMessage, UserMessage, LLMResponse,
 )
-from agent.core import run_agent, build_memory_block
+from agent.core import run_task, build_memory_block
 from agent.registry import create_default_registry, ReadFileTool
 from agent.memory import FileMemory
 from agent.tracer import Tracer
@@ -94,7 +94,7 @@ class MemoryInjectionTest(unittest.TestCase):
             llm = MessageCapturingLLM([
                 LLMResponse(actions=[Action(type='done', answer='ok', tool_call_id='t1')]),
             ])
-            run_agent(goal='g', task_name='t', llm=llm,
+            run_task(goal='g', task_name='t', llm=llm,
                       tool_registry=create_default_registry(),
                       memory=mem, tracer=Tracer(f'{tmp}/traces'),
                       max_steps=5, workspace=tmp)
@@ -139,7 +139,7 @@ class MultiToolCallTest(unittest.TestCase):
                 ]),
             )
             llm = MessageCapturingLLM([resp1, resp2])
-            answer = run_agent(goal='g', task_name='t', llm=llm,
+            answer = run_task(goal='g', task_name='t', llm=llm,
                                tool_registry=create_default_registry(),
                                memory=FileMemory(f'{tmp}/m.json'),
                                tracer=Tracer(f'{tmp}/traces'),
@@ -187,7 +187,7 @@ class EscalateApproverTest(unittest.TestCase):
             ]),
         )
         llm = MessageCapturingLLM([resp1, resp2])
-        answer = run_agent(goal='g', task_name='t', llm=llm,
+        answer = run_task(goal='g', task_name='t', llm=llm,
                            tool_registry=create_default_registry(),
                            memory=FileMemory(f'{tmp}/m.json'),
                            tracer=Tracer(f'{tmp}/traces'),

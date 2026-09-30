@@ -23,9 +23,13 @@ Source = "https://github.com/your-username/Lab-coding-agent"
 
 [project.scripts]
 freud = "agent.cli:main"
+freud-governance = "governance.web:main"
 
 [tool.setuptools.packages.find]
-include = ["agent*"]
+include = ["agent*", "governance*"]
+
+[tool.setuptools.package-data]
+governance = ["index.html"]
 
 [build-system]
 requires = ["setuptools>=68.0"]

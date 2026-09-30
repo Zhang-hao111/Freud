@@ -8,6 +8,7 @@ from agent.types import (
 )
 from agent.registry import ToolRegistry
 from agent.guardrail import guardrail
+from agent.permissions import MODES, auto_approve_escalate, needs_confirm
 from agent.memory import FileMemory
 from agent.tracer import Tracer
 from agent import ui
@@ -18,6 +19,9 @@ def build_system_prompt(workspace: str) -> str:
 你有以下工具可用：
 - read_file: 读取文件内容
 - write_file: 写入文件内容（自动创建父目录）
+- edit_file: 对已有文件做精确字符串替换，改动局部时优先用它
+- grep: 用正则搜索文件内容
+- glob: 按 glob 模式查找文件路径
 - shell: 执行 Shell 命令
 
 你的工作流程：
@@ -77,27 +81,35 @@ def _print_result(tool_name: str, success: bool, result_text: str):
 
 
 def run_agent(
-    goal: str,
-    task_name: str,
     llm,
-    tool_registry: ToolRegistry,
+    tool_registry: ToolRegistry | None,
     memory: FileMemory,
     tracer: Tracer,
+    messages: list[Message],
+    user_text: str,
     max_steps: int = 30,
     approver: Callable[[Action], bool] | None = None,
-    workspace: str = '.',
+    confirmer: Callable[[Action], bool] | None = None,
+    mode: str = 'ask',
 ) -> str:
-    """运行 Agent Loop，返回完成消息。"""
+    """唯一的 Agent Loop 引擎 — REPL 与 batch 共用。
 
-    messages: list[Message] = [
-        SystemMessage(content=build_system_prompt(workspace) + build_memory_block(memory)),
-        UserMessage(content=build_goal_prompt(task_name, goal)),
-    ]
+    向 messages 追加 user_text 后循环：LLM → 护栏/权限判定 → 执行 → 回灌，
+    直到 done 或步数耗尽，返回 answer。system prompt 与记忆注入由调用方
+    组装（batch 走 run_task，REPL 自己拼）；tool_registry 传 None 表示
+    mock，工具不真正执行。mode 为三档权限模式（见 agent.permissions）：
+    ask 下文件改动需经 confirmer 确认（无 confirmer 可问则直接拒绝），
+    yolo 自动批准 escalate 与文件改动；approver 仅在 mode 非 yolo 时
+    用于 escalate 级命令的人工确认。
+    """
+    if mode not in MODES:
+        raise ValueError(f"未知权限模式: {mode}，可选 {'/'.join(MODES)}")
 
+    messages.append(UserMessage(content=user_text))
     done = False
     answer = ''
     steps = 0
-    tools: list[BaseTool] = tool_registry.list()
+    tools: list[BaseTool] = tool_registry.list() if tool_registry else []
 
     print()  # 空行分隔
 
@@ -120,7 +132,10 @@ def run_agent(
             if response.message.content:
                 text = response.message.content.strip()
                 if text:
-                    print(text)
+                    print(f'\n{text}\n')
+
+        if not response.actions:
+            break
 
         # 2. 依次处理本轮全部动作（模型可能一次给出多个并行 tool call）
         for action in response.actions:
@@ -142,7 +157,10 @@ def run_agent(
                 continue
 
             if guard.disposition == 'escalate':
-                if approver:
+                if auto_approve_escalate(mode):
+                    approved = True
+                    print(f"  {ui.paint('yellow', '⚡')} {ui.paint('dim', 'yolo 模式自动批准')}")
+                elif approver:
                     approved = approver(action)
                 else:
                     approved = False
@@ -157,7 +175,33 @@ def run_agent(
                         messages.append(UserMessage(content=msg))
                     tracer.record(steps, action, result=f'[ESCALATED-DENIED] {guard.reason}')
                     continue
-                print(f"  {ui.paint('yellow', '⚡')} {ui.paint('dim', '已人工批准')}")
+                if not auto_approve_escalate(mode):
+                    print(f"  {ui.paint('yellow', '⚡')} {ui.paint('dim', '已人工批准')}")
+
+            # ask 模式：文件改动执行前必须确认（REPL 传 confirmer；非交互 batch 无 confirmer 则拒绝）
+            if needs_confirm(mode, action.tool or ''):
+                target = (action.args or {}).get('path', '')
+                if confirmer:
+                    if not confirmer(action):
+                        msg = f'用户拒绝本次文件修改: {target}'
+                        print(ui.render_result_line(msg, ok=False))
+                        if action.tool_call_id:
+                            messages.append(ToolMessage(content=msg, tool_call_id=action.tool_call_id))
+                        else:
+                            messages.append(UserMessage(content=msg))
+                        tracer.record(steps, action, result=f'[USER-DENIED] {target}', feedback=msg)
+                        continue
+                else:
+                    msg = ('ask 模式下文件修改需人工确认，当前无法询问；'
+                           '无人值守请使用 --yes（等价 yolo）或 --mode accept/yolo')
+                    print(ui.render_tool_line(action.tool or '', action.args or {}))
+                    print(ui.render_result_line(msg, ok=False))
+                    if action.tool_call_id:
+                        messages.append(ToolMessage(content=msg, tool_call_id=action.tool_call_id))
+                    else:
+                        messages.append(UserMessage(content=msg))
+                    tracer.record(steps, action, result='[CONFIRM-UNAVAILABLE]', feedback=msg)
+                    continue
 
             # 4. 分发执行
             if action.type == 'done':
@@ -194,6 +238,17 @@ def run_agent(
                 # 打印工具调用
                 _print_tool_call(action)
 
+                if tool_registry is None:
+                    # mock：不真正执行，统一回灌 '(mock)'
+                    result_text = '(mock)'
+                    print(ui.render_result_line(result_text, True))
+                    if action.tool_call_id:
+                        messages.append(ToolMessage(content=result_text, tool_call_id=action.tool_call_id))
+                    else:
+                        messages.append(UserMessage(content=result_text))
+                    tracer.record(steps, action, result=result_text)
+                    continue
+
                 try:
                     tool_result = tool_registry.execute(tool_name, tool_args)
                 except ValueError as e:
@@ -229,7 +284,7 @@ def run_agent(
                     if tool_name == 'shell' and '返回码' in (tool_result.error or ''):
                         feedback = f"命令执行失败（返回码非零），这是出错信息，请参考前面的执行结果修正你的方法后重试。"
                         messages.append(UserMessage(content=feedback))
-                    elif tool_name in ('read_file', 'write_file'):
+                    elif tool_name in ('read_file', 'write_file', 'edit_file'):
                         feedback = f"文件操作失败，请检查路径是否正确后重试。"
                         messages.append(UserMessage(content=feedback))
 
@@ -252,3 +307,26 @@ def run_agent(
         print(ui.render_result_line(answer, ok=False))
 
     return answer
+
+
+def run_task(
+    goal: str,
+    task_name: str,
+    llm,
+    tool_registry: ToolRegistry,
+    memory: FileMemory,
+    tracer: Tracer,
+    max_steps: int = 30,
+    approver: Callable[[Action], bool] | None = None,
+    confirmer: Callable[[Action], bool] | None = None,
+    mode: str = 'ask',
+    workspace: str = '.',
+) -> str:
+    """batch 任务入口：组装系统提示与任务目标消息后交给引擎；REPL 直接调 run_agent。"""
+    messages: list[Message] = [
+        SystemMessage(content=build_system_prompt(workspace) + build_memory_block(memory)),
+    ]
+    return run_agent(llm, tool_registry, memory, tracer, messages,
+                     user_text=build_goal_prompt(task_name, goal),
+                     max_steps=max_steps, approver=approver, confirmer=confirmer,
+                     mode=mode)

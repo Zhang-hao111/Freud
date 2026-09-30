@@ -102,6 +102,8 @@ def ensure_config() -> Path:
     if cfg_path:
         return cfg_path
     cfg_path = _default_cfg_path()
+    # 首跑时 ~/.agent-harness 可能不存在，write_text 不会自动建目录
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
     defaults = {
         "api_key": "",
         "model": "deepseek-chat",

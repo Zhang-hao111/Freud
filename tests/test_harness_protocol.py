@@ -16,7 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agent.types import Action, AssistantMessage, ToolMessage
-from agent.core import run_agent
+from agent.core import run_task
 from agent.llm import MockLLM
 from agent.registry import create_default_registry
 from agent.memory import FileMemory
@@ -58,7 +58,7 @@ class ProtocolRegressionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             memory = FileMemory(f'{tmp}/memory.json')
             tracer = Tracer(f'{tmp}/traces')
-            answer = run_agent(
+            answer = run_task(
                 goal='测试任务', task_name='回归测试', llm=llm,
                 tool_registry=registry, memory=memory, tracer=tracer,
                 max_steps=10, workspace=tmp,

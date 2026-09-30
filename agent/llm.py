@@ -138,9 +138,11 @@ class OpenAIProvider:
                 })
         return result
 
-    def chat(self, messages: list[Message], tools: list[BaseTool]) -> LLMResponse:
+    def chat(self, messages: list[Message], tools: list[BaseTool],
+             include_done: bool = True, include_take_note: bool = True) -> LLMResponse:
         api_messages = self._convert_messages(messages)
-        tool_defs = build_tool_definitions(tools)
+        tool_defs = build_tool_definitions(tools, include_done=include_done,
+                                           include_take_note=include_take_note)
 
         # 指数退避重试（1s / 2s），最多 3 次尝试，覆盖网络抖动与限流
         response = None
