@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MovieLens 分析 Agent</title>
+  <style>
+    :root { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #172033; background: #f3f6fb; }
+    body { max-width: 1120px; margin: auto; padding: 28px 18px 72px; }
+    h1 { margin-bottom: 6px; } h2 { margin-top: 0; font-size: 1.15rem; }
+    .muted { color: #64748b; } .error { color: #b91c1c; }
+    .card { margin: 18px 0; padding: 22px; border: 1px solid #d9e1ec; border-radius: 14px; background: white; box-shadow: 0 5px 16px #1720330b; }
+    textarea, input, select { box-sizing: border-box; width: 100%; padding: 11px; border: 1px solid #b9c6d8; border-radius: 8px; font: inherit; }
+    textarea { min-height: 82px; } label { display: block; margin-top: 10px; color: #475569; }
+    button { margin-top: 12px; padding: 10px 18px; border: 0; border-radius: 8px; background: #1d4ed8; color: white; font: inherit; cursor: pointer; }
+    button:disabled { opacity: .5; } .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+    .metric { padding: 14px; border: 1px solid #dbe2ec; border-radius: 10px; overflow-wrap: anywhere; }
+    .badge { display: inline-block; padding: 5px 12px; border-radius: 999px; background: #dbeafe; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #f1f5f9; padding: 14px; border-radius: 8px; }
+    img { display: block; max-width: 100%; margin-top: 14px; border: 1px solid #e2e8f0; }
+    a { color: #1d4ed8; } [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <h1>MovieLens 分类、聚类与降维 Agent</h1>
+  <p class="muted">页面只查询已登记的实际模型和分析结果；不可用时明确失败，不生成示例答案。</p>
+  <section class="card">
+    <h2>发起分析</h2>
+    <textarea id="prompt">请使用两种分类算法对照预测该用户是否会给目标电影不低于 4 分。</textarea>
+    <div class="grid">
+      <label>UserID<input id="user-id" type="number" min="1"></label>
+      <label>MovieID<input id="movie-id" type="number" min="1"></label>
+      <label>用户集合（逗号分隔）<input id="user-ids" placeholder="例如：1,2,3"></label>
+      <label>算法（留空则两种对照）
+        <select id="algorithm"><option value="">自动对照</option><option value="logistic_regression">逻辑回归</option><option value="random_forest">随机森林</option><option value="kmeans">K-Means</option><option value="dbscan">DBSCAN</option><option value="pca">PCA</option><option value="truncated_svd">Truncated SVD</option></select>
+      </label>
+      <label>算法参数 JSON<input id="parameters" placeholder='例如：{"n_clusters":3}'></label>
+      <label>目标维数<input id="target-dimensions" type="number" min="2" placeholder="例如：2"></label>
+      <label>信息保留阈值<input id="information-threshold" type="number" min="0.01" max="1" step="0.01" placeholder="与目标维数二选一"></label>
+      <label>降维对照聚类
+        <select id="cluster-algorithm"><option value="">默认 K-Means</option><option value="kmeans">K-Means</option><option value="dbscan">DBSCAN</option></select>
+      </label>
+      <label>对照聚类参数 JSON<input id="cluster-parameters" placeholder='例如：{"n_clusters":3}'></label>
+    </div>
+    <button id="start">开始分析</button>
+  </section>
+  <section class="card" id="status-card" hidden><h2>执行情况</h2><span class="badge" id="status"></span><p id="phase"></p><p class="muted" id="task-id"></p><p class="error" id="error"></p></section>
+  <main id="results" hidden>
+    <section class="card"><h2>实际分析结果</h2><div class="grid" id="result-grid"></div></section>
+    <section class="card"><h2>实验对照、版本与依据</h2><pre id="evidence"></pre></section>
+    <section class="card"><h2>适用限制</h2><ul id="limitations"></ul></section>
+    <section class="card" id="plots-card" hidden><h2>二维可视化</h2><div id="plots"></div></section>
+    <section class="card"><h2>结果获取</h2><a id="report-link" download>下载评价报告</a>　<a id="sample-link" target="_blank">查看本次结果 JSON</a></section>
+    <section class="card"><h2>依据本次结果追问</h2><input id="question" placeholder="例如：两种算法的评价指标有什么差异？"><button id="ask">提问</button><pre id="answer" hidden></pre></section>
+  </main>
+  <script>
+    const byId = id => document.getElementById(id);
+    let currentTask = null;
+    async function api(path, options) { const response = await fetch(path, options); const data = await response.json(); if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`); return data; }
+    function parseIds() { return byId('user-ids').value.split(',').map(value => value.trim()).filter(Boolean).map(Number); }
+    function render(job) {
+      byId('results').hidden = false; byId('result-grid').replaceChildren(); byId('limitations').replaceChildren(); byId('plots').replaceChildren();
+      const limitations = new Set(); const evidence = [];
+      for (const result of job.results) {
+        const card = document.createElement('div'); card.className = 'metric';
+        const heading = document.createElement('strong'); heading.textContent = result.algorithm; card.append(heading);
+        const content = document.createElement('pre');
+        if (result.task === 'classification') content.textContent = `UserID：${result.user_id}\nMovieID：${result.movie_id}\n电影：${result.movie_title}\n类别：${result.prediction}\n高分概率：${result.positive_probability}\n模型：${result.model_version}`;
+        else if (result.task === 'clustering') content.textContent = result.users.map(user => `UserID ${user.user_id} → 群体 ${user.cluster}${user.noise ? '（噪声）' : ''}\n${user.group_summary.description}\n训练期评分：${user.profile.history_count}\n代表用户：${user.group_summary.representative_user_ids.join('、')}\n代表类型：${user.group_summary.top_genres.map(item => item.genre).join('、') || '无'}`).join('\n\n');
+        else content.textContent = `${result.original_dimensions} 维 → ${result.actual_dimensions} 维\n信息保留：${result.information_retained}\nARI：${result.cluster_comparison.adjusted_rand_index}\n用户群体对照：${result.cluster_comparison.user_assignments.map(item => `${item.user_id}: ${item.original_cluster} → ${item.reduced_cluster}`).join('；')}\n耗时：${result.resource_usage.runtime_seconds}s`;
+        card.append(content); byId('result-grid').append(card);
+        evidence.push({algorithm: result.algorithm, parameters: result.parameters, metrics: result.task === 'classification' ? {validation: result.validation_metrics, test: result.test_metrics} : result.metrics || result.cluster_comparison, data_split: result.data_split, time_boundaries: result.time_boundaries, analysis_version: result.analysis_version, result_version: result.model_version || result.result_version, training_cutoff: result.feature_cutoff || result.training_cutoff});
+        for (const item of result.limitations || []) limitations.add(item);
+        if (result.plot_path) { const image = document.createElement('img'); image.src = `/api/jobs/${currentTask}/plot/${result.algorithm}`; image.alt = `${result.algorithm} 二维用户画像`; byId('plots').append(image); }
+      }
+      byId('evidence').textContent = JSON.stringify(evidence, null, 2);
+      byId('limitations').replaceChildren(...[...limitations].map(value => { const item = document.createElement('li'); item.textContent = value; return item; }));
+      byId('plots-card').hidden = !job.results.some(result => result.plot_path);
+      byId('report-link').href = `/api/jobs/${currentTask}/report`; byId('sample-link').href = `/api/jobs/${currentTask}/sample`;
+    }
+    async function poll() {
+      try { const job = await api(`/api/jobs/${currentTask}`); byId('status').textContent = job.status; byId('phase').textContent = job.phase; byId('error').textContent = job.error || '';
+        if (job.status === 'completed') { byId('start').disabled = false; render(job); } else if (job.status === 'failed') byId('start').disabled = false; else setTimeout(poll, 500);
+      } catch (error) { byId('error').textContent = error.message; byId('start').disabled = false; }
+    }
+    byId('start').addEventListener('click', async () => {
+      byId('start').disabled = true; byId('results').hidden = true; byId('status-card').hidden = false; byId('error').textContent = '';
+      try { const payload = {prompt: byId('prompt').value}; if (byId('user-id').value) payload.user_id = Number(byId('user-id').value); if (byId('movie-id').value) payload.movie_id = Number(byId('movie-id').value); const ids = parseIds(); if (ids.length) payload.user_ids = ids; if (byId('algorithm').value) payload.algorithm = byId('algorithm').value; if (byId('parameters').value) payload.parameters = JSON.parse(byId('parameters').value); if (byId('target-dimensions').value) payload.target_dimensions = Number(byId('target-dimensions').value); if (byId('information-threshold').value) payload.information_threshold = Number(byId('information-threshold').value); if (byId('cluster-algorithm').value) payload.cluster_algorithm = byId('cluster-algorithm').value; if (byId('cluster-parameters').value) payload.cluster_parameters = JSON.parse(byId('cluster-parameters').value); const job = await api('/api/jobs', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)}); currentTask = job.task_id; byId('task-id').textContent = `任务标识：${currentTask}`; poll(); }
+      catch (error) { byId('error').textContent = error.message; byId('start').disabled = false; }
+    });
+    byId('ask').addEventListener('click', async () => { try { const result = await api(`/api/jobs/${currentTask}/ask`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({question: byId('question').value})}); byId('answer').hidden = false; byId('answer').textContent = result.answer; } catch (error) { byId('answer').hidden = false; byId('answer').textContent = error.message; } });
+  </script>
+</body>
+</html>

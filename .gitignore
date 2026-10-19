@@ -10,6 +10,7 @@ __pycache__/
 dist/
 build/
 governance-runs/
+analysis-runs/
 ml-1m/
 
 # 项目说明

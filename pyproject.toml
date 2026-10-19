@@ -14,7 +14,10 @@ classifiers = [
 ]
 
 dependencies = [
+    "joblib>=1.4.0",
+    "numpy>=2.0.0",
     "openai>=1.0.0",
+    "scikit-learn>=1.6.0",
 ]
 
 [project.urls]
@@ -24,12 +27,15 @@ Source = "https://github.com/your-username/Lab-coding-agent"
 [project.scripts]
 freud = "agent.cli:main"
 freud-governance = "governance.web:main"
+freud-analysis-train = "analysis.training:main"
+freud-analysis = "analysis.web:main"
 
 [tool.setuptools.packages.find]
-include = ["agent*", "governance*"]
+include = ["agent*", "analysis*", "governance*"]
 
 [tool.setuptools.package-data]
 governance = ["index.html"]
+analysis = ["index.html"]
 
 [build-system]
 requires = ["setuptools>=68.0"]
