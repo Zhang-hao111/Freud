@@ -1,10 +1,50 @@
 # Freud
 
-Freud 是一个运行在终端中的轻量级 AI 编程助手。它将兼容 OpenAI 接口的语言模型与受控工具执行环境组合起来，可以根据自然语言任务读取代码、修改文件、执行命令、运行测试，并把工具结果继续反馈给模型完成后续判断。
+Freud 是一个大数据课程实验项目，包含终端编程助手，以及基于 MovieLens 1M 的数据治理和分析系统。
 
-项目重点提供可复用的 Agent 执行框架，而不是把模型输出直接当作最终结果。工具调用、安全检查、权限确认、会话恢复和执行轨迹都由本地 Harness 管理。
+- **编程助手**：结合 OpenAI 兼容模型与本地工具，读取和修改文件、执行命令、运行测试，并提供权限检查、会话恢复和执行轨迹。
+- **迭代一：数据治理**：通过 Hadoop Streaming 检查和清洗数据，比较清洗前后的五维质量评分，生成版本化数据、报告和时间边界。
+- **迭代二：数据分析**：使用迭代一产物进行分类、聚类和降维，通过网页查看结果、评价指标和图表。
 
-## 主要能力
+分析流程为：`MovieLens 原始数据 → 迭代一清洗与评估 → 迭代二训练与查询`。迭代二要求迭代一产物的版本、哈希和 `T1/T2` 有效；数据或结果不可用时返回明确错误。迭代三是课程计划中的后续工作，当前仓库尚未实现。
+
+## 数据治理与分析
+
+### 迭代一：清洗与评估
+
+准备 Python 3.11+、`uv`、Hadoop 3 和 Hadoop Streaming jar，将 MovieLens 的 `users.dat`、`movies.dat`、`ratings.dat` 放入 `ml-1m/ml-1m/`。原始数据和运行产物不随仓库分发。
+
+```bash
+uv sync
+export HADOOP_STREAMING_JAR=/path/to/hadoop-streaming-3.x.x.jar
+uv run freud-governance --host 127.0.0.1 --port 8765
+```
+
+打开 `http://127.0.0.1:8765/` 发起任务。成功后的 `governance-runs/<任务ID>/` 保存清洗数据、报告、数据版本和 `T1/T2`。Hadoop 本地模式可以运行实验，但不代表多节点集群部署。环境配置和评分口径见 [迭代一说明](docs/iteration1/README.md)。
+
+### 迭代二：分类、聚类和降维
+
+| 任务 | 已实现算法 |
+| --- | --- |
+| 分类 | Logistic Regression、Random Forest |
+| 聚类 | K-Means、DBSCAN |
+| 降维 | PCA、Truncated SVD |
+
+先使用迭代一成功任务目录训练并登记结果，再启动查询页面：
+
+```bash
+RUN_ID=你的迭代一任务ID
+uv run freud-analysis-train --iteration1-run "governance-runs/$RUN_ID" --output analysis-runs
+uv run freud-analysis --results analysis-runs --host 127.0.0.1 --port 8865
+```
+
+打开 `http://127.0.0.1:8865/` 查询。模型和报告保存在 `analysis-runs/`，不会随源码分发。分类与画像使用训练期数据，验证期用于模型选择，测试期用于最终评价。分析页面的任务识别和追问使用规则处理已登记结果，不调用外部大模型。算法参数、数据口径和结果文件说明见 [迭代二说明](docs/iteration2/README.md)。
+
+课程 PPT 未包含在仓库中，尚需核对上述算法是否全部属于课程指定范围。实验指标以具体数据版本的实际报告为准。
+
+## 编程助手
+
+### 主要能力
 
 - 交互式终端会话和单次任务文件两种运行方式；
 - 支持 OpenAI 兼容的 Chat Completions API；
@@ -29,6 +69,7 @@ Freud 是一个运行在终端中的轻量级 AI 编程助手。它将兼容 Ope
 项目安装时会自动安装：
 
 - `openai>=1.0.0`
+- `numpy>=2.0.0`、`joblib>=1.4.0`、`scikit-learn>=1.6.0`（数据分析）
 
 使用真实模型时，还需要一个兼容 OpenAI Chat Completions 协议的 API 地址、模型名称和 API Key。Mock 模式不需要外部模型服务。
 
@@ -192,6 +233,8 @@ freud --file task.md --yes
 ```text
 .
 ├── agent/          # Agent 循环、模型接口、工具、权限、会话和终端界面
+├── governance/     # Hadoop 数据治理流程与网页
+├── analysis/       # 分类、聚类、降维训练与网页
 ├── docs/           # 需求、设计和使用文档
 ├── tasks/          # 任务描述及任务产物
 ├── tests/          # 单元测试和回归测试
