@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from governance.pipeline import HadoopGovernanceTool, HadoopPipeline, cutoff
+from governance.pipeline import HadoopGovernanceTool, HadoopPipeline, cutoff, validate_references
 from governance.web import Handler, explain
 
 
@@ -56,6 +56,22 @@ class GovernanceWorkerTests(unittest.TestCase):
         audited = self.worker("audit-reduce", b"".join(sorted(mapped.splitlines(keepends=True))))
         cleaned = [json.loads(line) for line in self.worker("clean-map", audited).splitlines()]
         self.assertEqual([row["action"] for row in cleaned], ["quarantine", "quarantine"])
+
+    def test_final_clean_checks_references_after_entities_are_removed(self):
+        raw = b"2::10::4::1014854402\n"
+        mapped = self.worker("audit-map", raw, "/input/ratings.dat")
+        audited = self.worker("audit-reduce", mapped)
+        (self.directory / "users.dat").write_text("1::M::25::12::00501\n")
+        cleaned = json.loads(self.worker("clean-map", audited))
+        self.assertEqual(cleaned["action"], "quarantine")
+        self.assertIn("reference", cleaned["issues"])
+
+    def test_cleaned_reference_validation_rejects_orphans(self):
+        (self.directory / "ratings.dat").write_text("1::10::5::1014854400\n3::10::4::1014854401\n")
+        with self.assertRaisesRegex(RuntimeError, "孤立引用.*1"):
+            validate_references(self.directory)
+        (self.directory / "ratings.dat").write_text("1::10::5::1014854400\n")
+        validate_references(self.directory)
 
     def test_duplicate_survivor_is_deterministic_and_prefers_canonical_record(self):
         raw = b"10::  Film (2000)  ::Drama\n10::Film (2000)::Drama\n"

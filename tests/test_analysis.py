@@ -6,12 +6,13 @@ import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 import joblib
 
-from analysis.data import IterationOneDataset, digest, event_features
+from analysis.data import IterationOneDataset, digest, event_features, user_profiles
 from analysis.tools import AnalysisRegistry, tool_catalog
-from analysis.training import AnalysisTrainer
+from analysis.training import AnalysisTrainer, classification_metrics
 from analysis.web import AnalysisAgent, Handler, grounded_follow_up
 
 
@@ -91,6 +92,32 @@ class AnalysisTests(unittest.TestCase):
             target.write("1::10::5::1\n")
         with self.assertRaisesRegex(ValueError, "哈希不一致"):
             IterationOneDataset(damaged)
+
+    def test_profile_preferences_only_include_rated_genres(self):
+        dataset = IterationOneDataset(self.iteration1_run)
+        for movie in dataset.movies.values():
+            movie["genres"] = ["Drama"]
+        profiles = user_profiles(dataset, min_history=3)
+        for details in profiles["details"].values():
+            self.assertEqual([genre["genre"] for genre in details["top_genres"]], ["Drama"])
+
+    def test_classifier_selection_precedes_test_evaluation(self):
+        dataset = IterationOneDataset(self.iteration1_run)
+        matrices, targets, _ = event_features(dataset)
+        seen = []
+        def check(target, probability):
+            if target is targets["test"]:
+                self.assertEqual(seen.count("validation"), 2)
+                seen.append("test")
+            else:
+                seen.append("validation")
+            return classification_metrics(target, probability)
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory)
+            (run_dir / "models").mkdir()
+            trainer = AnalysisTrainer(self.iteration1_run, run_dir)
+            with patch("analysis.training.classification_metrics", side_effect=check):
+                trainer._train_classifiers(run_dir, matrices, targets)
 
     def test_training_registers_six_algorithms_and_artifacts(self):
         report = self.registry_data

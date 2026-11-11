@@ -16,7 +16,7 @@ GENRES = ("Action", "Adventure", "Animation", "Children's", "Comedy", "Crime",
           "Documentary", "Drama", "Fantasy", "Film-Noir", "Horror", "Musical",
           "Mystery", "Romance", "Sci-Fi", "Thriller", "War", "Western")
 FEATURE_VERSION = "ml1m-event-features-v1"
-PROFILE_VERSION = "ml1m-user-profiles-v1"
+PROFILE_VERSION = "ml1m-user-profiles-v2"
 
 
 def digest(path):
@@ -272,7 +272,8 @@ def user_profiles(dataset, min_history=2):
                                  [math.log1p(totals[user_id]["count"]), overall_mean / 5.0,
                                   positive_rate]))
         matrix.append(vector)
-        ranked = sorted(zip(GENRES, means, counts[user_id]), key=lambda item: (-item[1], -item[2], item[0]))
+        ranked = sorted((item for item in zip(GENRES, means, counts[user_id]) if item[2] > 0),
+                        key=lambda item: (-item[1], -item[2], item[0]))
         details[str(user_id)] = {
             "history_count": totals[user_id]["count"],
             "mean_rating": round(overall_mean, 4),

@@ -38,6 +38,21 @@ def cutoff(days, fraction):
     return None
 
 
+def validate_references(clean_dir):
+    ids = {}
+    for table in ("users", "movies"):
+        with open(clean_dir / f"{table}.dat", encoding="iso-8859-1") as source:
+            ids[table] = {line.split("::", 1)[0] for line in source}
+    orphan_count = 0
+    with open(clean_dir / "ratings.dat", encoding="iso-8859-1") as source:
+        for line in source:
+            fields = line.split("::", 2)
+            if len(fields) < 2 or fields[0] not in ids["users"] or fields[1] not in ids["movies"]:
+                orphan_count += 1
+    if orphan_count:
+        raise RuntimeError(f"清洗后评分存在孤立引用：{orphan_count} 条")
+
+
 class HadoopPipeline:
     def __init__(self, source_dir, output_dir, hadoop="hadoop", streaming_jar=None,
                  hdfs_root="/freud/governance", python_command="python3"):
@@ -166,6 +181,7 @@ class HadoopPipeline:
             actions = self.split_clean(run_dir / "clean-final.jsonl", clean_dir)
             if not (clean_dir / "ratings.dat").stat().st_size:
                 raise RuntimeError("清洗后没有有效评分，无法确定时间边界")
+            validate_references(clean_dir)
             notify("Hadoop 复评清洗后数据")
             clean_paths = self.stage(clean_dir, hdfs_run + "/cleaned")
             self.job("audit-after", clean_paths, hdfs_run + "/audit-after", "audit-map", "audit-reduce", hdfs_run + "/cleaned")

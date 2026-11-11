@@ -28,7 +28,7 @@ from analysis.data import (FEATURE_VERSION, PROFILE_VERSION, IterationOneDataset
 CLASSIFIERS = ("logistic_regression", "random_forest")
 CLUSTERERS = ("kmeans", "dbscan")
 REDUCERS = ("pca", "truncated_svd")
-EXPERIMENT_VERSION = "ml1m-analysis-experiment-v1"
+EXPERIMENT_VERSION = "ml1m-analysis-experiment-v2"
 RANDOM_STATE = 20260930
 
 
@@ -256,8 +256,6 @@ class AnalysisTrainer:
             model.fit(matrices["train"], targets["train"])
             validation_probability = model.predict_proba(matrices["validation"])[:, 1]
             validation = classification_metrics(targets["validation"], validation_probability)
-            test_probability = model.predict_proba(matrices["test"])[:, 1]
-            test = classification_metrics(targets["test"], test_probability)
             model_path = run_dir / "models" / f"{name}.joblib"
             joblib.dump(model, model_path)
             model_version = hashlib.sha256(
@@ -265,13 +263,16 @@ class AnalysisTrainer:
             results[name] = {
                 "algorithm": name, "model_version": model_version,
                 "model_path": str(model_path.relative_to(run_dir)), "parameters": parameters,
-                "validation_metrics": validation, "test_metrics": test,
+                "validation_metrics": validation,
                 "training_seconds": round(time.perf_counter() - started, 6),
                 "selection_score": validation["f1"],
                 "feature_version": FEATURE_VERSION,
                 "training_cutoff": self.dataset.report["T1"],
             }
         selected = sorted(results, key=lambda name: (-results[name]["selection_score"], name))[0]
+        for name, (model, _) in definitions.items():
+            test_probability = model.predict_proba(matrices["test"])[:, 1]
+            results[name]["test_metrics"] = classification_metrics(targets["test"], test_probability)
         return {"algorithms": results, "selected_algorithm": selected,
                 "selection_basis": "验证期 F1 最高；并列时按算法名确定，测试期不参与选择",
                 "positive_class": "Rating>=4"}

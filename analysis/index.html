@@ -1,94 +1,109 @@
 <!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>MovieLens 分析 Agent</title>
-  <style>
-    :root { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #172033; background: #f3f6fb; }
-    body { max-width: 1120px; margin: auto; padding: 28px 18px 72px; }
-    h1 { margin-bottom: 6px; } h2 { margin-top: 0; font-size: 1.15rem; }
-    .muted { color: #64748b; } .error { color: #b91c1c; }
-    .card { margin: 18px 0; padding: 22px; border: 1px solid #d9e1ec; border-radius: 14px; background: white; box-shadow: 0 5px 16px #1720330b; }
-    textarea, input, select { box-sizing: border-box; width: 100%; padding: 11px; border: 1px solid #b9c6d8; border-radius: 8px; font: inherit; }
-    textarea { min-height: 82px; } label { display: block; margin-top: 10px; color: #475569; }
-    button { margin-top: 12px; padding: 10px 18px; border: 0; border-radius: 8px; background: #1d4ed8; color: white; font: inherit; cursor: pointer; }
-    button:disabled { opacity: .5; } .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
-    .metric { padding: 14px; border: 1px solid #dbe2ec; border-radius: 10px; overflow-wrap: anywhere; }
-    .badge { display: inline-block; padding: 5px 12px; border-radius: 999px; background: #dbeafe; }
-    pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #f1f5f9; padding: 14px; border-radius: 8px; }
-    img { display: block; max-width: 100%; margin-top: 14px; border: 1px solid #e2e8f0; }
-    a { color: #1d4ed8; } [hidden] { display: none !important; }
-  </style>
-</head>
-<body>
-  <h1>MovieLens 分类、聚类与降维 Agent</h1>
-  <p class="muted">页面只查询已登记的实际模型和分析结果；不可用时明确失败，不生成示例答案。</p>
-  <section class="card">
-    <h2>发起分析</h2>
-    <textarea id="prompt">请使用两种分类算法对照预测该用户是否会给目标电影不低于 4 分。</textarea>
-    <div class="grid">
-      <label>UserID<input id="user-id" type="number" min="1"></label>
-      <label>MovieID<input id="movie-id" type="number" min="1"></label>
-      <label>用户集合（逗号分隔）<input id="user-ids" placeholder="例如：1,2,3"></label>
-      <label>算法（留空则两种对照）
-        <select id="algorithm"><option value="">自动对照</option><option value="logistic_regression">逻辑回归</option><option value="random_forest">随机森林</option><option value="kmeans">K-Means</option><option value="dbscan">DBSCAN</option><option value="pca">PCA</option><option value="truncated_svd">Truncated SVD</option></select>
-      </label>
-      <label>算法参数 JSON<input id="parameters" placeholder='例如：{"n_clusters":3}'></label>
-      <label>目标维数<input id="target-dimensions" type="number" min="2" placeholder="例如：2"></label>
-      <label>信息保留阈值<input id="information-threshold" type="number" min="0.01" max="1" step="0.01" placeholder="与目标维数二选一"></label>
-      <label>降维对照聚类
-        <select id="cluster-algorithm"><option value="">默认 K-Means</option><option value="kmeans">K-Means</option><option value="dbscan">DBSCAN</option></select>
-      </label>
-      <label>对照聚类参数 JSON<input id="cluster-parameters" placeholder='例如：{"n_clusters":3}'></label>
-    </div>
-    <button id="start">开始分析</button>
-  </section>
-  <section class="card" id="status-card" hidden><h2>执行情况</h2><span class="badge" id="status"></span><p id="phase"></p><p class="muted" id="task-id"></p><p class="error" id="error"></p></section>
-  <main id="results" hidden>
-    <section class="card"><h2>实际分析结果</h2><div class="grid" id="result-grid"></div></section>
-    <section class="card"><h2>实验对照、版本与依据</h2><pre id="evidence"></pre></section>
-    <section class="card"><h2>适用限制</h2><ul id="limitations"></ul></section>
-    <section class="card" id="plots-card" hidden><h2>二维可视化</h2><div id="plots"></div></section>
-    <section class="card"><h2>结果获取</h2><a id="report-link" download>下载评价报告</a>　<a id="sample-link" target="_blank">查看本次结果 JSON</a></section>
-    <section class="card"><h2>依据本次结果追问</h2><input id="question" placeholder="例如：两种算法的评价指标有什么差异？"><button id="ask">提问</button><pre id="answer" hidden></pre></section>
-  </main>
-  <script>
-    const byId = id => document.getElementById(id);
-    let currentTask = null;
-    async function api(path, options) { const response = await fetch(path, options); const data = await response.json(); if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`); return data; }
-    function parseIds() { return byId('user-ids').value.split(',').map(value => value.trim()).filter(Boolean).map(Number); }
-    function render(job) {
-      byId('results').hidden = false; byId('result-grid').replaceChildren(); byId('limitations').replaceChildren(); byId('plots').replaceChildren();
-      const limitations = new Set(); const evidence = [];
-      for (const result of job.results) {
-        const card = document.createElement('div'); card.className = 'metric';
-        const heading = document.createElement('strong'); heading.textContent = result.algorithm; card.append(heading);
-        const content = document.createElement('pre');
-        if (result.task === 'classification') content.textContent = `UserID：${result.user_id}\nMovieID：${result.movie_id}\n电影：${result.movie_title}\n类别：${result.prediction}\n高分概率：${result.positive_probability}\n模型：${result.model_version}`;
-        else if (result.task === 'clustering') content.textContent = result.users.map(user => `UserID ${user.user_id} → 群体 ${user.cluster}${user.noise ? '（噪声）' : ''}\n${user.group_summary.description}\n训练期评分：${user.profile.history_count}\n代表用户：${user.group_summary.representative_user_ids.join('、')}\n代表类型：${user.group_summary.top_genres.map(item => item.genre).join('、') || '无'}`).join('\n\n');
-        else content.textContent = `${result.original_dimensions} 维 → ${result.actual_dimensions} 维\n信息保留：${result.information_retained}\nARI：${result.cluster_comparison.adjusted_rand_index}\n用户群体对照：${result.cluster_comparison.user_assignments.map(item => `${item.user_id}: ${item.original_cluster} → ${item.reduced_cluster}`).join('；')}\n耗时：${result.resource_usage.runtime_seconds}s`;
-        card.append(content); byId('result-grid').append(card);
-        evidence.push({algorithm: result.algorithm, parameters: result.parameters, metrics: result.task === 'classification' ? {validation: result.validation_metrics, test: result.test_metrics} : result.metrics || result.cluster_comparison, data_split: result.data_split, time_boundaries: result.time_boundaries, analysis_version: result.analysis_version, result_version: result.model_version || result.result_version, training_cutoff: result.feature_cutoff || result.training_cutoff});
-        for (const item of result.limitations || []) limitations.add(item);
-        if (result.plot_path) { const image = document.createElement('img'); image.src = `/api/jobs/${currentTask}/plot/${result.algorithm}`; image.alt = `${result.algorithm} 二维用户画像`; byId('plots').append(image); }
-      }
-      byId('evidence').textContent = JSON.stringify(evidence, null, 2);
-      byId('limitations').replaceChildren(...[...limitations].map(value => { const item = document.createElement('li'); item.textContent = value; return item; }));
-      byId('plots-card').hidden = !job.results.some(result => result.plot_path);
-      byId('report-link').href = `/api/jobs/${currentTask}/report`; byId('sample-link').href = `/api/jobs/${currentTask}/sample`;
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MovieLens 分析工作台</title><style>
+:root{font-family:-apple-system,BlinkMacSystemFont,"Noto Sans CJK SC","Microsoft YaHei",sans-serif;color:#202833;background:#e9edf1;font-synthesis:none}*{box-sizing:border-box}body{margin:0;padding:30px}button,input,textarea,select{font:inherit}button{cursor:pointer}button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{outline:3px solid #97baf8;outline-offset:2px}.shell{max-width:1440px;min-height:850px;margin:auto;display:grid;grid-template-columns:234px minmax(0,1fr);border:1px solid #ccd3dc;border-radius:16px;overflow:hidden;background:#fafbfd;box-shadow:0 18px 65px #28384a1c}.sidebar{background:#edf1f5;padding:25px 16px;display:flex;flex-direction:column;border-right:1px solid #dbe1e8}.brand{display:flex;align-items:center;gap:11px;padding:4px 9px 34px}.brand-mark{width:34px;height:34px;display:grid;place-items:center;border-radius:10px;background:#263b55;color:white;font-weight:700;letter-spacing:-2px;padding-right:3px}.brand strong{font-size:14px}.brand small{display:block;color:#84909d;font-size:11px;margin-top:3px}.nav-label{font-size:11px;color:#8b96a3;padding:0 11px;margin-bottom:9px;font-weight:600}.nav button{width:100%;text-align:left;border:0;background:transparent;color:#606f7e;padding:11px 12px;border-radius:8px;font-size:13px;display:flex;align-items:center;gap:10px;margin:2px 0}.nav button.active{background:#dbe6f4;color:#244c83;font-weight:650}.ico{width:18px;text-align:center;font-size:16px}.side-bottom{margin-top:auto;padding:16px 10px 2px;border-top:1px solid #d9e0e8;color:#758290;font-size:11px;line-height:1.8}.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#7cae93;margin-right:7px}.main{min-width:0}.topbar{height:65px;display:flex;align-items:center;justify-content:space-between;padding:0 42px;border-bottom:1px solid #e8ecf0;color:#8a96a4;font-size:12px}.topbar strong{color:#576576;font-weight:600}.preview{background:#edf2f8;border:1px solid #dbe4f0;color:#667e9e;padding:6px 10px;border-radius:6px;font-size:11px}.content{max-width:1080px;margin:auto;padding:43px 42px 60px}.heading{display:flex;justify-content:space-between;align-items:end;gap:20px;margin-bottom:27px}.heading h1{font-size:29px;letter-spacing:-1px;line-height:1.25;margin:0 0 9px;font-weight:680}.heading p{font-size:13px;line-height:1.7;color:#8793a1;margin:0}.heading .subtle{color:#8594a5;font-size:12px;white-space:nowrap}.layout{display:grid;grid-template-columns:minmax(0,1fr) 278px;gap:20px;align-items:start}.panel{background:white;border:1px solid #e4e9ee;border-radius:12px;box-shadow:0 2px 7px #20354705}.composer{padding:23px 24px 22px}.panel-head{display:flex;align-items:center;justify-content:space-between;gap:10px}.panel h2{font-size:14px;margin:0;font-weight:670}.caption{font-size:11px;color:#a1acb7}.task-tabs{display:flex;gap:5px;margin:21px 0 23px;padding:4px;background:#f2f5f8;border-radius:9px;width:max-content}.task-tabs button{border:0;border-radius:6px;padding:8px 14px;background:transparent;color:#83909e;font-size:12px}.task-tabs button.active{background:white;color:#304b6d;box-shadow:0 1px 4px #2b405914;font-weight:650}.field-label{display:block;font-size:12px;font-weight:600;color:#526171;margin-bottom:8px}.textarea-wrap{border:1px solid #e0e7ee;border-radius:9px;background:#fcfdfe;overflow:hidden}.textarea-wrap:focus-within{border-color:#90acd0;box-shadow:0 0 0 3px #dfeaf7}.textarea-wrap textarea{border:0;outline:0;resize:vertical;width:100%;height:88px;background:transparent;padding:13px 14px;font-size:13px;color:#344253;line-height:1.6}.input-hint{padding:0 14px 12px;color:#a4afba;font-size:11px}.inputs{display:grid;grid-template-columns:1fr 1fr;gap:13px;margin-top:20px}.control input,.control select{width:100%;height:41px;border:1px solid #e0e7ee;border-radius:8px;background:#fff;color:#4a5969;padding:0 12px;font-size:12px}.control input::placeholder{color:#b0bac5}.advanced{margin-top:19px}.advanced summary{font-size:12px;color:#7890a9;cursor:pointer;list-style:none;width:max-content}.advanced summary::-webkit-details-marker{display:none}.advanced summary::before{content:'›';display:inline-block;font-size:17px;margin-right:8px;transition:transform .15s}.advanced[open] summary::before{transform:rotate(90deg)}.advanced-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;padding-top:15px}.actions{display:flex;align-items:center;justify-content:space-between;margin-top:25px;padding-top:19px;border-top:1px solid #edf0f3}.action-note{font-size:11px;color:#a0acb7}.primary{border:0;border-radius:8px;padding:11px 19px;background:#335f97;color:white;font-size:12px;font-weight:600}.primary:hover{background:#284e7f}.right{display:grid;gap:16px}.side-card{padding:20px}.side-title{font-size:13px;font-weight:650;margin-bottom:18px}.status-line{display:flex;align-items:center;gap:9px;font-size:12px;color:#617484}.status-icon{background:#e8f3ed;color:#5c9976;width:25px;height:25px;border-radius:50%;display:grid;place-items:center}.tiny{font-size:11px;color:#a4afb9;line-height:1.7;margin:10px 0 0}.rule{height:1px;background:#eef1f4;margin:18px 0}.data-row{display:flex;justify-content:space-between;gap:10px;font-size:11px;margin:12px 0;color:#96a2af}.data-row span:last-child{color:#596a7c;font-variant-numeric:tabular-nums}.note-card{background:#f4f7fa;border:1px solid #e5ebf1;padding:17px 18px;border-radius:10px}.note-card strong{font-size:12px;color:#627c98}.note-card p{font-size:11px;line-height:1.8;color:#93a0ac;margin:8px 0 0}.results{margin-top:22px;padding:22px 24px}.results-head{display:flex;justify-content:space-between;align-items:center}.results-head h2{font-size:14px}.pill{font-size:10px;color:#54765f;background:#eaf4ed;padding:5px 8px;border-radius:5px}.result-sub{font-size:11px;color:#9aa6b2;margin:7px 0 19px}.comparison{border-top:1px solid #eef1f4}.result-row{display:grid;grid-template-columns:minmax(120px,1fr) repeat(2,minmax(72px,.55fr));gap:12px;align-items:center;border-bottom:1px solid #f0f2f5;padding:15px 0;font-size:12px}.result-row.header{font-size:10px;color:#a0abb6;padding:11px 0}.model{font-weight:600;color:#405163}.model small{display:block;font-size:10px;color:#a3adb8;font-weight:400;margin-top:4px}.val{font-variant-numeric:tabular-nums;color:#52677d}.result-footer{display:flex;align-items:center;justify-content:space-between;margin-top:17px;color:#9ba7b3;font-size:11px;gap:12px}.ghost{border:0;background:transparent;color:#5980a9;font-size:11px;padding:4px 0}.empty{display:none;padding:30px 0;text-align:center;color:#a1aeb9;font-size:12px}.follow{margin-top:22px;display:flex;gap:9px}.follow input{min-width:0;flex:1;border:1px solid #e3e9ef;border-radius:8px;padding:11px 12px;font-size:12px}.follow button{border:1px solid #e1e8ef;border-radius:8px;background:#fff;color:#6682a0;padding:0 15px;font-size:12px}.footnote{font-size:11px;color:#a3afba;margin-top:17px;line-height:1.7}.mobile-head{display:none}[hidden]{display:none!important}@media(max-width:980px){body{padding:0}.shell{border-radius:0;min-height:100vh}.layout{grid-template-columns:1fr}.right{grid-template-columns:1fr 1fr}.content{padding:32px 28px}.topbar{padding:0 28px}}@media(max-width:640px){.shell{display:block}.sidebar{padding:14px;border-right:0;border-bottom:1px solid #dbe1e8}.brand{padding:0 0 12px}.brand small,.nav-label,.side-bottom{display:none}.nav{display:flex;gap:4px}.nav button{justify-content:center;padding:9px 5px}.topbar{height:52px;padding:0 18px}.content{padding:27px 17px}.heading{align-items:start}.heading h1{font-size:24px}.heading .subtle{display:none}.right{grid-template-columns:1fr}.inputs,.advanced-grid{grid-template-columns:1fr}.result-row{grid-template-columns:1fr 68px 68px}.result-footer{align-items:start;flex-direction:column}}
+
+button:disabled{opacity:.55;cursor:not-allowed}a{color:#5980a9;text-decoration:none}a:hover{text-decoration:underline}.error-text{font-size:12px;color:#ae4242;line-height:1.6;overflow-wrap:anywhere}.algorithm-result{border-top:1px solid #eef1f4;padding:17px 0}.algorithm-result h3,.section-title{font-size:13px;color:#405163;margin:0 0 12px}.detail-row{display:flex;gap:14px;justify-content:space-between;margin:9px 0;font-size:12px;line-height:1.6}.detail-row span:first-child{color:#8997a5;flex-shrink:0}.detail-row span:last-child{color:#45596d;text-align:right;overflow-wrap:anywhere}.user-result{border-top:1px solid #f0f2f5;padding:12px 0}.user-result strong{font-size:12px}.user-result p{font-size:12px;color:#778898;line-height:1.6}.result-details{border-top:1px solid #eef1f4;padding:15px 0;font-size:12px;color:#61758a}.result-details summary,.evidence-block summary{cursor:pointer;color:#587a9d}.result-details ul{padding-left:19px;line-height:1.8;color:#758494}.evidence-block{margin:10px 0}.evidence-block pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f5f7fa;border-radius:8px;padding:12px;font-size:11px;line-height:1.6;color:#617184}.result-footer{flex-wrap:wrap}.follow{margin-top:8px}.answer{white-space:pre-wrap;overflow-wrap:anywhere;background:#f5f7fa;border-radius:8px;padding:13px;margin-top:10px;color:#627487;font-size:12px;line-height:1.7}figure{margin:0 0 18px}figcaption{font-size:12px;color:#788b9d;margin-bottom:8px}figure img{display:block;width:100%;height:auto;border:1px solid #e9eef3;border-radius:8px}.data-row span:last-child{overflow-wrap:anywhere;text-align:right}@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}
+</style></head>
+<body><div class="shell">
+<aside class="sidebar"><div class="brand"><div class="brand-mark">m.</div><div><strong>MovieLens</strong><small>分析工作台</small></div></div><div class="nav-label">分析任务</div><nav class="nav" aria-label="任务类型"><button type="button" data-task="classification"><span class="ico">◉</span>评分预测</button><button type="button" data-task="clustering"><span class="ico">◌</span>用户聚类</button><button type="button" data-task="reduction"><span class="ico">⌘</span>画像降维</button></nav><div class="side-bottom">MovieLens 1M<br>分类 · 聚类 · 降维</div></aside>
+<main class="main"><div class="topbar"><span><strong>分析工作台</strong> / <span id="crumb"></span></span><span>MovieLens 分析</span></div><div class="content">
+<div class="heading"><div><h1 id="title"></h1><p id="subtitle"></p></div><span class="subtle">基于已登记的分析结果</span></div>
+<div class="layout"><div><section class="panel composer"><div class="panel-head"><h2>创建分析</h2><span class="caption">选择任务并填写信息</span></div><div class="task-tabs" role="group" aria-label="分析类型"><button type="button" data-task="classification">评分预测</button><button type="button" data-task="clustering">用户聚类</button><button type="button" data-task="reduction">画像降维</button></div>
+<label class="field-label" for="prompt">分析问题</label><div class="textarea-wrap"><textarea id="prompt"></textarea><div class="input-hint">用自然语言描述你想了解的问题</div></div>
+<div class="inputs"><div class="control" id="one-field"><label class="field-label" for="user">用户 ID</label><input id="user" type="number" min="1" step="1" placeholder="例如 645"></div><div class="control" id="movie-field"><label class="field-label" for="movie">电影 ID</label><input id="movie" type="number" min="1" step="1" placeholder="例如 1"></div><div class="control" id="many-field" hidden><label class="field-label" for="users">用户集合</label><input id="users" placeholder="例如 645, 646, 647"></div><div class="control"><label class="field-label" for="algorithm">分析算法</label><select id="algorithm"></select></div></div>
+<details class="advanced"><summary>高级选项</summary><div class="advanced-grid"><div class="control" id="params-field"><label class="field-label" for="params">聚类算法参数 JSON</label><input id="params" placeholder='例如 {"n_clusters": 3}'></div><div class="control" id="dim-field"><label class="field-label" for="dim">目标维数</label><input id="dim" type="number" min="2" step="1" placeholder="例如 2"></div><div class="control" id="threshold-field"><label class="field-label" for="threshold">信息保留阈值</label><input id="threshold" type="number" min="0.01" max="1" step="any" placeholder="与目标维数二选一"></div><div class="control" id="compare-field"><label class="field-label" for="compare">对照聚类算法</label><select id="compare"><option value="">默认 K-Means</option><option value="kmeans">K-Means</option><option value="dbscan">DBSCAN</option></select></div><div class="control" id="compare-params-field"><label class="field-label" for="compare-params">对照聚类参数 JSON</label><input id="compare-params" placeholder='例如 {"n_clusters": 3}'></div></div><p class="tiny" id="advanced-hint"></p></details>
+<div class="actions"><span class="action-note">未指定算法时对照两种算法</span><button class="primary" id="run" type="button">开始分析</button></div></section>
+<section class="panel results" id="result" hidden aria-live="polite"><div class="results-head"><h2>分析结果</h2><span class="pill">已完成</span></div><p class="result-sub" id="result-sub"></p><div id="result-cards"></div><section id="plots-section" hidden><h3 class="section-title">二维可视化</h3><div id="plots"></div></section><details class="result-details"><summary>实验对照、版本与依据</summary><div id="evidence"></div></details><details class="result-details"><summary>适用限制</summary><ul id="limitations"></ul></details><div class="result-footer"><span>结果来自本次实际调用的分析工具</span><span><a id="report-link" download>下载评价报告</a>　<a id="sample-link" target="_blank" rel="noopener">查看结果 JSON</a></span></div><div class="rule"></div><label class="field-label" for="question">基于本次结果追问</label><div class="follow"><input id="question" placeholder="例如：两种算法的评价指标有什么差异？"><button id="ask" type="button">提问</button></div><div class="answer" id="answer" hidden role="status"></div></section></div>
+<aside class="right"><section class="panel side-card" aria-live="polite"><div class="side-title">执行状态</div><div class="status-line"><span class="status-icon" id="status-icon">○</span><span id="status">等待开始</span></div><p class="tiny" id="phase">输入问题与所需 ID，然后开始分析。</p><p class="error-text" id="error" hidden></p><div id="metadata" hidden><div class="rule"></div><div class="data-row"><span>分析版本</span><span id="analysis-version"></span></div><div class="data-row"><span>训练截止</span><span id="t1"></span></div><div class="data-row"><span>验证截止</span><span id="t2"></span></div><div class="data-row"><span>训练期评分</span><span id="train-count"></span></div></div></section><div class="note-card"><strong>如何理解结果</strong><p>预测是模型对已有数据的估计；群体和降维结果是统计描述。请结合评价指标与适用范围一起查看。</p></div></aside></div>
+</div></main></div>
+<script>
+const byId = id => document.getElementById(id);
+const configs = {
+  classification: {title:'评分预测', subtitle:'预测用户对电影的评分是否达到 4 分，并对照两种模型的表现。', prompt:'请使用两种分类算法对照预测该用户是否会给目标电影不低于 4 分。', algorithms:[['','自动对照两种算法'],['logistic_regression','Logistic Regression'],['random_forest','Random Forest']]},
+  clustering: {title:'用户聚类', subtitle:'基于训练期观影偏好，查看用户群体归属及群体特征。', prompt:'请用两种聚类算法比较这些用户的群体归属和群体解释。', algorithms:[['','自动对照两种算法'],['kmeans','K-Means'],['dbscan','DBSCAN']]},
+  reduction: {title:'画像降维', subtitle:'压缩用户偏好画像，对比降维前后的聚类表现与信息保留。', prompt:'请比较 PCA 和 Truncated SVD，展示降维前后的聚类差异。', algorithms:[['','自动对照两种算法'],['pca','PCA'],['truncated_svd','Truncated SVD']]}
+};
+const names = {logistic_regression:'Logistic Regression',random_forest:'Random Forest',kmeans:'K-Means',dbscan:'DBSCAN',pca:'PCA',truncated_svd:'Truncated SVD'};
+let task = 'classification', currentTask = null, requestNumber = 0;
+function element(tag, text, className) { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (className) node.className = className; return node; }
+function showTask(next) {
+  task = next; const c = configs[task]; requestNumber++; currentTask = null;
+  document.querySelectorAll('[data-task]').forEach(button => { const active = button.dataset.task === task; button.classList.toggle('active', active); button.setAttribute('aria-pressed', String(active)); });
+  byId('title').textContent = byId('crumb').textContent = c.title; byId('subtitle').textContent = c.subtitle; byId('prompt').value = c.prompt;
+  byId('one-field').hidden = byId('movie-field').hidden = task !== 'classification'; byId('many-field').hidden = task === 'classification';
+  byId('params-field').hidden = task !== 'clustering'; ['dim-field','threshold-field','compare-field','compare-params-field'].forEach(id => byId(id).hidden = task !== 'reduction');
+  byId('advanced-hint').textContent = task === 'classification' ? '分类算法使用已登记的模型参数。' : task === 'clustering' ? '自定义参数会重新拟合；请先选择适用的算法。' : '目标维数与信息保留阈值只能填写一项。';
+  byId('algorithm').replaceChildren(...c.algorithms.map(([value,label]) => { const option = element('option',label); option.value = value; return option; }));
+  byId('result').hidden = byId('metadata').hidden = byId('answer').hidden = true; byId('run').disabled = false; setStatus('等待开始','输入问题与所需 ID，然后开始分析。');
+}
+function setStatus(status, phase, error = '') { byId('status').textContent = status; byId('phase').textContent = phase; byId('error').textContent = error; byId('error').hidden = !error; byId('status-icon').textContent = error ? '!' : status === '已完成' ? '✓' : '○'; }
+async function api(path, options) { const response = await fetch(path, options); const data = await response.json(); if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`); return data; }
+function positiveInteger(value, label) { const n = Number(value); if (!value || !Number.isSafeInteger(n) || n < 1) throw new Error(`${label}必须是正整数`); return n; }
+function jsonObject(value, label) { let result; try { result = JSON.parse(value); } catch { throw new Error(`${label}不是有效的 JSON`); } if (!result || typeof result !== 'object' || Array.isArray(result)) throw new Error(`${label}必须是 JSON 对象`); return result; }
+function buildPayload() {
+  const prompt = byId('prompt').value.trim(); if (!prompt) throw new Error('请输入分析问题'); const payload = {prompt};
+  if (task === 'classification') { payload.user_id = positiveInteger(byId('user').value, '用户 ID'); payload.movie_id = positiveInteger(byId('movie').value, '电影 ID'); }
+  else { const input = byId('users').value.trim(); if (!input) throw new Error('请输入用户集合'); payload.user_ids = input.split(/[,，]/).map(v => positiveInteger(v.trim(), '用户 ID')); }
+  if (byId('algorithm').value) payload.algorithm = byId('algorithm').value;
+  if (task === 'clustering' && byId('params').value.trim()) { if (!payload.algorithm) throw new Error('使用自定义聚类参数时，请先选择一种算法'); payload.parameters = jsonObject(byId('params').value, '聚类参数'); }
+  if (task === 'reduction') {
+    if (byId('dim').value && byId('threshold').value) throw new Error('目标维数与信息保留阈值只能填写一项');
+    if (byId('dim').value) { payload.target_dimensions = positiveInteger(byId('dim').value, '目标维数'); if (payload.target_dimensions < 2) throw new Error('目标维数必须至少为 2'); }
+    if (byId('threshold').value) { const threshold = Number(byId('threshold').value); if (!(threshold > 0 && threshold <= 1)) throw new Error('信息保留阈值必须大于 0 且不超过 1'); payload.information_threshold = threshold; }
+    if (byId('compare').value) payload.cluster_algorithm = byId('compare').value;
+    if (byId('compare-params').value.trim()) payload.cluster_parameters = jsonObject(byId('compare-params').value, '对照聚类参数');
+  }
+  return payload;
+}
+function valueText(value) { return value === null || value === undefined ? '不适用' : typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value); }
+function addPair(container, label, value) { const row = element('div', undefined, 'detail-row'); row.append(element('span',label),element('span',valueText(value))); container.append(row); }
+function addSection(parent, title) { const section = element('section',undefined,'algorithm-result'); section.append(element('h3',title)); parent.append(section); return section; }
+function addPre(parent, title, data) { const detail = element('details',undefined,'evidence-block'); detail.append(element('summary',title),element('pre',valueText(data))); parent.append(detail); }
+function render(job) {
+  const cards = byId('result-cards'), evidence = byId('evidence'), plots = byId('plots'); cards.replaceChildren(); evidence.replaceChildren(); plots.replaceChildren();
+  const limitations = new Set(); byId('result-sub').textContent = `${configs[job.task].title} · ${job.results.length} 种算法`;
+  for (const result of job.results) {
+    const section = addSection(cards,names[result.algorithm] || result.algorithm);
+    if (result.task === 'classification') {
+      addPair(section,'用户 / 电影',`${result.user_id} / ${result.movie_id} · ${result.movie_title}`); addPair(section,'预测类别', result.prediction === 1 ? '预计评分不低于 4 分' : '预计评分低于 4 分'); addPair(section,'高分概率',`${(result.positive_probability * 100).toFixed(2)}%`);
+    } else if (result.task === 'clustering') {
+      for (const user of result.users) { const part = element('div',undefined,'user-result'); part.append(element('strong',`用户 ${user.user_id} · ${user.noise ? '噪声点' : '群体 ' + user.cluster}`),element('p',user.group_summary.description)); addPair(part,'训练期评分',`${user.profile.history_count} 条`); addPair(part,'群体人数',user.group_summary.size); addPair(part,'代表用户',user.group_summary.representative_user_ids.join('、') || '无'); addPair(part,'群体代表类型',user.group_summary.top_genres.map(item => item.genre).join('、') || '无'); addPair(part,'用户已评分的偏好类型',user.profile.top_genres.map(item => `${item.genre}（${item.ratings} 条）`).join('、') || '无'); section.append(part); }
+    } else {
+      addPair(section,'维数',`${result.original_dimensions} → ${result.actual_dimensions}`); addPair(section,'信息保留',`${(result.information_retained * 100).toFixed(2)}%`); addPair(section,'聚类对照 ARI',result.cluster_comparison.adjusted_rand_index); addPair(section,'耗时',`${result.resource_usage.runtime_seconds} 秒`); addPair(section,'峰值追踪内存',`${(result.resource_usage.peak_memory_bytes / 1024 / 1024).toFixed(2)} MiB`);
+      for (const point of result.coordinates) addPair(section,`用户 ${point.user_id} 坐标`,point.values.join(', '));
+      for (const item of result.cluster_comparison.user_assignments) addPair(section,`用户 ${item.user_id} 群体变化`,`${item.original_cluster} → ${item.reduced_cluster}`);
+      if (result.plot_path) { const figure = element('figure'); figure.append(element('figcaption',names[result.algorithm] || result.algorithm)); const image = document.createElement('img'); image.src = `/api/jobs/${currentTask}/plot/${result.algorithm}`; image.alt = `${result.algorithm} 用户画像二维图`; figure.append(image); plots.append(figure); }
     }
-    async function poll() {
-      try { const job = await api(`/api/jobs/${currentTask}`); byId('status').textContent = job.status; byId('phase').textContent = job.phase; byId('error').textContent = job.error || '';
-        if (job.status === 'completed') { byId('start').disabled = false; render(job); } else if (job.status === 'failed') byId('start').disabled = false; else setTimeout(poll, 500);
-      } catch (error) { byId('error').textContent = error.message; byId('start').disabled = false; }
-    }
-    byId('start').addEventListener('click', async () => {
-      byId('start').disabled = true; byId('results').hidden = true; byId('status-card').hidden = false; byId('error').textContent = '';
-      try { const payload = {prompt: byId('prompt').value}; if (byId('user-id').value) payload.user_id = Number(byId('user-id').value); if (byId('movie-id').value) payload.movie_id = Number(byId('movie-id').value); const ids = parseIds(); if (ids.length) payload.user_ids = ids; if (byId('algorithm').value) payload.algorithm = byId('algorithm').value; if (byId('parameters').value) payload.parameters = JSON.parse(byId('parameters').value); if (byId('target-dimensions').value) payload.target_dimensions = Number(byId('target-dimensions').value); if (byId('information-threshold').value) payload.information_threshold = Number(byId('information-threshold').value); if (byId('cluster-algorithm').value) payload.cluster_algorithm = byId('cluster-algorithm').value; if (byId('cluster-parameters').value) payload.cluster_parameters = JSON.parse(byId('cluster-parameters').value); const job = await api('/api/jobs', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)}); currentTask = job.task_id; byId('task-id').textContent = `任务标识：${currentTask}`; poll(); }
-      catch (error) { byId('error').textContent = error.message; byId('start').disabled = false; }
-    });
-    byId('ask').addEventListener('click', async () => { try { const result = await api(`/api/jobs/${currentTask}/ask`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({question: byId('question').value})}); byId('answer').hidden = false; byId('answer').textContent = result.answer; } catch (error) { byId('answer').hidden = false; byId('answer').textContent = error.message; } });
-  </script>
-</body>
-</html>
+    addPair(section,'模型 / 结果版本',result.model_version || result.result_version);
+    const ev = addSection(evidence,names[result.algorithm] || result.algorithm); addPre(ev,'实际参数',result.parameters);
+    if (result.task === 'classification') { addPre(ev,'验证集指标',result.validation_metrics); addPre(ev,'测试集指标',result.test_metrics); }
+    else if (result.task === 'clustering') addPre(ev,'聚类评价指标',result.metrics);
+    else addPre(ev,'降维前后聚类对照',result.cluster_comparison);
+    addPre(ev,'数据切分与时间边界',{data_split:result.data_split,time_boundaries:result.time_boundaries,analysis_version:result.analysis_version});
+    (result.limitations || []).forEach(item => limitations.add(item));
+  }
+  byId('limitations').replaceChildren(...[...limitations].map(value => element('li',value))); byId('plots-section').hidden = !plots.children.length;
+  byId('report-link').href = `/api/jobs/${currentTask}/report`; byId('sample-link').href = `/api/jobs/${currentTask}/sample`;
+  const first = job.results[0]; byId('analysis-version').textContent = first.analysis_version; byId('t1').textContent = first.time_boundaries?.T1 || '不可用'; byId('t2').textContent = first.time_boundaries?.T2 || '不可用'; byId('train-count').textContent = first.data_split?.train?.records?.toLocaleString() ?? '不可用'; byId('metadata').hidden = false;
+  byId('answer').hidden = true; byId('result').hidden = false;
+}
+async function poll(id, sequence) {
+  try { const job = await api(`/api/jobs/${id}`); if (sequence !== requestNumber) return;
+    const labels = {running:'正在分析',completed:'已完成',failed:'分析失败'}; setStatus(labels[job.status] || job.status, job.phase || '', job.error || '');
+    if (job.status === 'completed') { render(job); byId('run').disabled = false; } else if (job.status === 'failed') byId('run').disabled = false; else setTimeout(() => poll(id, sequence), 500);
+  } catch (error) { if (sequence !== requestNumber) return; setStatus('查询失败','无法获取任务状态。',error.message); byId('run').disabled = false; }
+}
+byId('run').addEventListener('click', async () => {
+  const sequence = ++requestNumber; currentTask = null; byId('result').hidden = byId('metadata').hidden = true;
+  try { const payload = buildPayload(); byId('run').disabled = true; setStatus('正在提交','正在创建分析任务。'); const job = await api('/api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}); if (sequence !== requestNumber) return; currentTask = job.task_id; poll(currentTask, sequence); }
+  catch (error) { if (sequence !== requestNumber) return; setStatus('无法开始','请检查输入或服务状态。',error.message); byId('run').disabled = false; }
+});
+byId('ask').addEventListener('click', async () => {
+  const question = byId('question').value.trim(); byId('answer').hidden = false; if (!question) { byId('answer').textContent = '请输入关于本次结果的问题。'; return; }
+  const id = currentTask; byId('ask').disabled = true; byId('answer').textContent = '正在查询本次结果…';
+  try { const result = await api(`/api/jobs/${id}/ask`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question})}); if (id === currentTask) byId('answer').textContent = result.answer; }
+  catch (error) { if (id === currentTask) byId('answer').textContent = error.message; } finally { byId('ask').disabled = false; }
+});
+document.querySelectorAll('[data-task]').forEach(button => button.addEventListener('click', () => showTask(button.dataset.task)));
+showTask(task);
+</script></body></html>
