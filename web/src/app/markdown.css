@@ -25,7 +25,7 @@
 .ds-markdown code { font-family: ui-monospace, monospace; font-size: .88em; }
 .ds-markdown :not(pre) > code { background: var(--subtle); border-radius: 4px; padding: .12em .3em; }
 .markdown-table-wrapper { overflow-x: auto; max-width: 100%; margin-block: 12px; }
-.ds-markdown table { border-collapse: collapse; width: max-content; max-width: 100%; }
+.ds-markdown table { border-collapse: collapse; width: 100%; min-width: max-content; }
 .ds-markdown th, .ds-markdown td {
   border-bottom: 1px solid var(--line);
   padding: 8px 14px 8px 0;

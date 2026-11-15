@@ -377,7 +377,16 @@ body[data-ds-dark-theme] .freud-app {
 .hint { margin-block-start: 6px; color: var(--muted); font-size: 11px; }
 .end-context { padding: 3px 5px; border: 0; background: transparent; color: var(--accent); font-size: 11px; }
 
-.analysis-result { margin: 16px 0; padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--subtle); }
+.analysis-result { margin: 16px 0; padding: 20px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg); }
+.analysis-result .ds-markdown > h3:first-child { margin-bottom: 14px; font-size: 18px; }
+.analysis-result .ds-markdown h4 { margin-top: 26px; padding-top: 18px; border-top: 1px solid var(--line); }
+.analysis-result .markdown-table-wrapper { border: 1px solid var(--line); border-radius: 8px; }
+.analysis-result .ds-markdown table { margin: 0; font-size: 13px; }
+.analysis-result .ds-markdown th,
+.analysis-result .ds-markdown td { padding: 10px 12px; }
+.analysis-result .ds-markdown th { background: var(--subtle); white-space: nowrap; }
+.analysis-result .ds-markdown tbody tr:last-child td { border-bottom: 0; }
+.analysis-result .ds-markdown img { margin: 12px auto; border-radius: 8px; }
 .analysis-details { margin-top: 14px; color: var(--muted); font-size: 12px; }
 .analysis-details summary { cursor: pointer; color: var(--accent); }
 .analysis-details pre { max-height: 400px; background: var(--bg); }
