@@ -10,8 +10,8 @@
 
 ```bash
 export HADOOP_STREAMING_JAR=/path/to/hadoop-streaming-3.x.x.jar
-uv sync
-uv run freud-web
+uv sync --extra movielens
+uv run --extra movielens freud-web
 ```
 
 首次运行先按[总 README](../../README.md#网页交互)构建前端。打开 `http://127.0.0.1:8875/`，从「＋ 数据任务」选择「清洗与质量评估」。可用 `HADOOP_CMD`、`GOVERNANCE_HDFS_ROOT`、`HADOOP_PYTHON` 配置 Hadoop。
@@ -63,4 +63,4 @@ Hadoop shuffle 不保证同一键下记录的到达顺序。为使同一数据�
 
 ## 验证与限制
 
-`uv run python -m unittest tests.test_governance -v` 使用含重复、值域错误、孤立引用和冲突的微型数据验证 Streaming 工作脚本。完整端到端实验必须在可用 Hadoop 集群上运行；没有成功的 Hadoop 作业时，不应把本地单元测试当作实际 MovieLens 评分。当前代码不会把未运行的实验值写入报告。
+`uv run --extra movielens python -m unittest tests.test_governance -v` 使用含重复、值域错误、孤立引用和冲突的微型数据验证 Streaming 工作脚本。完整端到端实验必须在可用 Hadoop 集群上运行；没有成功的 Hadoop 作业时，不应把本地单元测试当作实际 MovieLens 评分。当前代码不会把未运行的实验值写入报告。

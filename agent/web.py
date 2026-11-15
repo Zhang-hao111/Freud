@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 
 from agent.config import load_config
 from agent.conversations import install_conversations
+from agent.plugins import install_plugins
 from agent.runtime import default_runtime, install_workflows
 from agent.session import dump_messages
 from agent.workspaces import install_workspaces
@@ -193,8 +194,6 @@ def make_handler(app):
 
 
 def main():
-    from agent.movielens import install_movie_lens
-
     parser = argparse.ArgumentParser(description='Freud 本地网页')
     parser.add_argument('--port', type=int, default=8875)
     parser.add_argument('--mock', action='store_true')
@@ -202,10 +201,11 @@ def main():
     if not (DIST / 'index.html').exists():
         parser.error('前端尚未构建：请在 web 目录执行 pnpm install && pnpm build')
     config = load_config()
+    config['launch_dir'] = str(Path.cwd())
     config['workspace'] = str(Path(config['workspace']).expanduser().resolve())
     os.chdir(config['workspace'])
     app = WebAgent(config, mock=args.mock)
-    app.runtime.mount(install_movie_lens)
+    install_plugins(app.runtime)
     server = ThreadingHTTPServer(('127.0.0.1', args.port), make_handler(app))
     print(f'Freud 网页：http://127.0.0.1:{server.server_port}/', flush=True)
     try:

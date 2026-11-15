@@ -1,6 +1,6 @@
 # Freud · MovieLens 数据分析 Agent
 
-Freud 是大数据分析课程项目，以 MovieLens 1M 为数据基础，将 Hadoop 数据治理、机器学习分析和 Agent 对话整合到同一个网页中。用户可以提交数据任务、查看执行进度与报告，并针对实际结果继续提问。
+Freud 是大数据分析课程项目。MovieLens 课程插件将 Hadoop 数据治理、机器学习分析和 Agent 对话接入同一个网页。用户可以提交数据任务、查看执行进度与报告，并针对实际结果继续提问。
 
 项目目前完成迭代一和迭代二。迭代三的知识图谱与图分析是课程后续内容，尚未实现。
 
@@ -47,7 +47,7 @@ MovieLens 1M
 - MovieLens 1M 的三个原始文件
 - 可选：兼容 OpenAI Chat Completions API 的模型服务，用于普通对话、结果解读和追问
 
-在项目根目录放置原始数据：
+将原始数据放在项目根目录的 `ml-1m/ml-1m/`。如果数据和运行产物放在其他位置，用 `MOVIELENS_ROOT` 指定包含 `ml-1m/` 的绝对路径。
 
 ```text
 ml-1m/ml-1m/
@@ -60,10 +60,10 @@ ml-1m/ml-1m/
 
 ## 安装与启动
 
-在项目根目录安装 Python 依赖并构建网页：
+在项目根目录安装 Agent 和 MovieLens 插件，再构建网页。
 
 ```bash
-uv sync
+uv sync --extra movielens
 cd web
 pnpm install --frozen-lockfile
 pnpm build
@@ -88,13 +88,13 @@ export HADOOP_STREAMING_JAR=/path/to/hadoop-streaming-3.x.x.jar
 
 也可以使用 `LLM_API_KEY`（或 `DEEPSEEK_API_KEY`）、`LLM_MODEL` 和 `LLM_API_BASE` 环境变量。配置优先级为环境变量、`config.json`、程序默认值。数据任务无需 LLM 即可执行和展示登记结果。
 
-启动网页：
+在项目根目录启动课程网页。
 
 ```bash
-uv run freud-web
+uv run --extra movielens freud-web
 ```
 
-访问 `http://127.0.0.1:8875/`。网页只监听本机地址。修改前端后重新运行 `pnpm build` 并刷新页面，修改 Python 后端后重启 `freud-web`。
+访问 `http://127.0.0.1:8875/`，输入框下方的「数据任务」菜单应显示清洗、训练和查询三个入口。只使用通用 Agent 时，运行 `uv sync` 安装核心包，再用 `uv run freud-web` 启动同一个网页。切换安装方式后重启服务即可重新发现插件。修改前端后重新运行 `pnpm build` 并刷新页面，修改 Python 后端后重启 `freud-web`。
 
 ## 网页交互
 
@@ -116,6 +116,8 @@ uv run freud-web
 
 ## 结果与数据目录
 
+课程产物保存在 `MOVIELENS_ROOT` 下，默认使用启动服务时的目录。会话和工作区登记保存在用户目录。
+
 ```text
 governance-runs/<任务ID>/    迭代一清洗数据、隔离记录、评估报告及中间结果
 analysis-runs/<任务ID>/      迭代二登记信息、模型、画像、群体、降维结果和图表
@@ -136,20 +138,22 @@ analysis-runs/latest.json    最近一次成功的迭代二训练登记
 agent/web.py              网页接口与审批交互
 agent/conversations.py    会话回合、工作区和追问路由
 agent/workflows.py        任务、表单、追问与报告注册
-agent/movielens.py        MovieLens 功能装配
+agent/plugins.py          发现并装配已安装插件
    │
-   ├── governance/        Hadoop 清洗与质量评估
-   └── analysis/          六种算法的训练、查询和报告
+plugins/movielens/        可独立安装的课程插件
+   └── movielens_plugin/  任务声明、结果解读与装配
+       ├── governance/    Hadoop 清洗与质量评估
+       └── analysis/      六种算法的训练、查询和报告
 ```
 
-`agent/runtime.py` 装配模型、工具和对话循环等服务。网页、终端 REPL 和批处理共享对话循环及工具执行逻辑。MovieLens 任务在 Python 进程启动时注册，网页依据任务目录生成菜单和表单。
+`agent/runtime.py` 装配模型、工具和对话循环等服务，供网页、终端 REPL 和批处理共享。网页启动时从已安装 Python 包的 `freud.plugins` 入口发现插件。MovieLens 插件注册治理、训练和查询三个 `WorkflowTask`，分别声明表单、执行、追问、报告和结果解读能力。网页根据任务目录生成菜单和表单，由通用调度器调用插件。进度、结果和审批的事件格式见 [Web 协议](docs/web-protocol.md)。
 
 前端参考 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness/tree/39163dd30f703a79079e2d2446545cff3c453738/packages/client)，复用了其主题、部分侧栏与输入框样式以及 Markdown 中文加粗规则。版权与许可见 [web/LICENSE](web/LICENSE)。
 
 ## 测试
 
 ```bash
-uv run python -m unittest discover -s tests
+uv run --extra movielens python -m unittest discover -s tests
 cd web
 pnpm type
 pnpm build

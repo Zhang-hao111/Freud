@@ -9,7 +9,7 @@ import tempfile
 import uuid
 from pathlib import Path
 
-from governance.pipeline import (ACTION_LABELS, ISSUE_LABELS, HadoopGovernanceTool,
+from movielens_plugin.governance.pipeline import (ACTION_LABELS, ISSUE_LABELS, HadoopGovernanceTool,
                                  HadoopPipeline, RULE_VERSION, SCORE_VERSION)
 
 

@@ -50,11 +50,11 @@
 
 | 文件 | 迭代一中的作用 |
 | --- | --- |
-| `governance/__init__.py` | 标记 `governance` 为 Python 包；不包含业务逻辑。 |
-| `governance/worker.py` | Hadoop Streaming worker。实现三表解析、字段/值域/时间/外键校验、业务键分组、确定性重复处理、清洗动作分类，以及五维评分的 map/combine/reduce。 |
-| `governance/pipeline.py` | 端到端编排器。负责上传、启动 Streaming 作业、合并结果、拆分清洗数据、记录哈希版本、核对记录守恒、生成 `T1/T2`、写 JSON/Markdown 报告，并通过 `HadoopGovernanceTool` 暴露为 Agent 工具。 |
-| `governance/service.py` | 校验清洗请求和版本参数，调用 Hadoop 工具并返回报告和进度。 |
-| `agent/movielens.py`、`agent/web.py` | 注册治理插件，通过 Freud 会话提供进度、样例、报告和追问。 |
+| `plugins/movielens/movielens_plugin/governance/__init__.py` | 标记 `governance` 为 Python 包；不包含业务逻辑。 |
+| `plugins/movielens/movielens_plugin/governance/worker.py` | Hadoop Streaming worker。实现三表解析、字段/值域/时间/外键校验、业务键分组、确定性重复处理、清洗动作分类，以及五维评分的 map/combine/reduce。 |
+| `plugins/movielens/movielens_plugin/governance/pipeline.py` | 端到端编排器。负责上传、启动 Streaming 作业、合并结果、拆分清洗数据、记录哈希版本、核对记录守恒、生成 `T1/T2`、写 JSON/Markdown 报告，并通过 `HadoopGovernanceTool` 暴露为 Agent 工具。 |
+| `plugins/movielens/movielens_plugin/governance/service.py` | 校验清洗请求和版本参数，调用 Hadoop 工具并返回报告和进度。 |
+| `plugins/movielens/movielens_plugin/`、`agent/web.py` | 注册治理插件，通过 Freud 会话提供进度、样例、报告和追问。 |
 | `agent/types.py` | 提供 `BaseTool` 与 `ToolResult` 通用类型；`HadoopGovernanceTool` 继承和返回这些类型。除此之外，通用 Coding Agent 的 ReAct、终端和文件工具不进入本轮 Web 治理数据流。 |
 
 ### 3.3 测试与说明文件
@@ -315,7 +315,7 @@ Hadoop 复评清洗后数据
 ### 6.1 专项回归
 
 ```bash
-uv run python -m unittest tests.test_governance -v
+uv run --extra movielens python -m unittest tests.test_governance -v
 ```
 
 这一步验证规则和接口逻辑，不应单独宣称“已经完成 Hadoop 实验”。
@@ -337,7 +337,7 @@ python3 --version
 
 ```bash
 export HADOOP_STREAMING_JAR=/path/to/hadoop-streaming-3.x.x.jar
-uv run freud-web
+uv run --extra movielens freud-web
 ```
 
 打开 `http://127.0.0.1:8875/`，选择「清洗与质量评估」。使用 HDFS 时可设置 `GOVERNANCE_HDFS_ROOT` 为集群可访问路径。演示 Hadoop 本地模式时应说明所用环境。
@@ -367,7 +367,7 @@ uv run freud-web
 
 ### 0:40—1:25：文件与架构
 
-**画面**：依次点开 `governance/worker.py`、`pipeline.py`、`web.py`、`index.html` 和 `tests/test_governance.py`，每个只停留几秒；随后展示本文第 4 节流程图。
+**画面**：依次点开 `plugins/movielens/movielens_plugin/governance/worker.py`、`pipeline.py`、`web.py`、`index.html` 和 `tests/test_governance.py`，每个只停留几秒；随后展示本文第 4 节流程图。
 
 **讲解词**：
 

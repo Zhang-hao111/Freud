@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { Markdown } from './Markdown.js'
 import { setThemePreference, useTheme } from './theme.js'
 import { workflowPayload, type WorkflowTask } from './workflowForm.js'
+import { parseStreamEvent } from './events.js'
 import inputStyle from '../dsh/InputBar.module.css'
 import sidebarStyle from '../dsh/SidebarRoot.module.css'
 import './freud.css'
@@ -165,7 +166,7 @@ export const App = () => {
         buffer += decoder.decode(value, { stream: !done })
         const lines = buffer.split('\n'); buffer = lines.pop() || ''
         for (const line of lines) if (line) {
-          const event: Item = JSON.parse(line)
+          const event = parseStreamEvent(line)
           if (event.type === 'error') { failed = true; setError(event.content || '发生错误') }
           else if (event.type === 'assistant_update') setItems(old => {
             const last = old.at(-1)

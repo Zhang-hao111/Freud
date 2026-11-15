@@ -1,17 +1,18 @@
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch, Mock
 
 from agent.session import SessionStore
 import agent.session as session_module
-from agent.task_llm import TaskLLM
+from movielens_plugin.task_llm import TaskLLM
 from agent.types import UserMessage
 from agent.web import WebAgent
-from agent.movielens import install_movie_lens
+from movielens_plugin import install_movie_lens
 from agent.workflows import TaskField, WorkflowReply, WorkflowTask
-from governance.service import GovernanceService, default_governance_root
+from movielens_plugin.governance.service import GovernanceService, default_governance_root
 from tests.test_analysis import create_iteration1_run
 from tests import test_governance
 
@@ -39,7 +40,7 @@ class WorkflowTests(unittest.TestCase):
         return events
 
     def test_local_filesystem_uses_writable_staging_and_hdfs_keeps_default(self):
-        with patch.dict('os.environ', {}, clear=True), patch('governance.service.shutil.which', return_value='/opt/hadoop/bin/hadoop'), patch('governance.service.subprocess.run') as run:
+        with patch.dict('os.environ', {}, clear=True), patch('movielens_plugin.governance.service.shutil.which', return_value='/opt/hadoop/bin/hadoop'), patch('movielens_plugin.governance.service.subprocess.run') as run:
             run.return_value = Mock(returncode=0, stdout='file:///\n')
             root = default_governance_root('hadoop')
             self.assertTrue(root.startswith(tempfile.gettempdir() + '/'))
@@ -47,7 +48,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(run.call_args.args[0], ['/opt/hadoop/bin/hdfs', 'getconf', '-confKey', 'fs.defaultFS'])
             run.return_value = Mock(returncode=0, stdout='hdfs://localhost:9000\n')
             self.assertEqual(default_governance_root('hadoop'), '/freud/governance')
-        with patch.dict('os.environ', {'GOVERNANCE_HDFS_ROOT': '/custom/root'}), patch('governance.service.subprocess.run') as run:
+        with patch.dict('os.environ', {'GOVERNANCE_HDFS_ROOT': '/custom/root'}), patch('movielens_plugin.governance.service.subprocess.run') as run:
             self.assertEqual(default_governance_root('hadoop'), '/custom/root')
             run.assert_not_called()
 
@@ -148,7 +149,7 @@ class WorkflowTests(unittest.TestCase):
         self.run_flow('training', '训练', iteration1_id=self.task_id)
         provider = Mock()
         provider.complete_text.side_effect = ['两种模型可进行对照。', '这是预测概率。', TimeoutError()]
-        self.flows.result_llm = TaskLLM(provider)
+        self.flows.plugins['analysis'] = replace(self.flows.plugins['analysis'], result_llm=TaskLLM(provider))
         events = self.run_flow('analysis', '分类预测', options={'user_id': 1, 'movie_id': 10})
         original = next(event for event in events if event['type'] == 'assistant')
         update = events[-1]
@@ -177,7 +178,7 @@ class WorkflowTests(unittest.TestCase):
         self.run_flow('analysis', '比较降维结果', options={'user_ids': [1, 2]})
         provider = Mock()
         provider.complete_text.return_value = 'ARI 校正了随机一致性。'
-        self.flows.result_llm = TaskLLM(provider)
+        self.flows.plugins['analysis'] = replace(self.flows.plugins['analysis'], result_llm=TaskLLM(provider))
         events = self.run_flow('followup', 'ARI 是用户归属不变的比例吗？', target='analysis')
         self.assertIn('LLM 解读', events[-1]['content'])
         system, request = provider.complete_text.call_args.args[0]
@@ -212,8 +213,9 @@ class WorkflowTests(unittest.TestCase):
             workflows.register('example', WorkflowTask(
                 '示例任务', '检查插件装配', '', run, followup,
                 fields=(TaskField('value', '值', '输入正整数', 'integer'),),
+                commands=('查看示例',),
+                artifacts=(('example-report', read),),
             ))
-            workflows.register_artifact('example-report', read)
 
         self.app.runtime.mount(install)
         task = next(task for task in self.flows.catalog() if task['id'] == 'example')
@@ -223,6 +225,20 @@ class WorkflowTests(unittest.TestCase):
         self.app.conversations.chat(self.session, '继续', events.append, followup=True)
         self.assertEqual(events[-1]['content'], '继续查看 7')
         self.assertEqual(self.flows.artifact(self.session, 'example-report', task_id)[0], b'example')
+
+    def test_plugin_registration_conflicts_leave_no_partial_registration(self):
+        def run(*_args):
+            return WorkflowReply('完成')
+
+        with self.assertRaises(ValueError):
+            self.flows.register('conflict', WorkflowTask(
+                '冲突任务', '', '', run, run,
+                commands=('新命令', '查看六种算法'),
+                artifacts=(('new-report', lambda *_args: None),),
+            ))
+        self.assertNotIn('conflict', self.flows.plugins)
+        self.assertNotIn('新命令', self.flows._commands)
+        self.assertNotIn('new-report', self.flows._artifacts)
 
     def test_deleting_legacy_session_does_not_reimport_it(self):
         legacy = self.root / 'memory.json'

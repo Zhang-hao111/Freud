@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass
 from typing import Literal
 
 from agent.core import build_chat_system_prompt
+from agent.events import Emit
 from agent.types import AssistantMessage, SystemMessage, UserMessage
 
 
@@ -33,11 +34,13 @@ class WorkflowTask:
     result_label: str = '结果'
     fields: tuple[TaskField, ...] = ()
     advanced: bool = False
+    commands: tuple[str, ...] = ()
+    artifacts: tuple[tuple[str, Callable], ...] = ()
+    result_llm: object | None = None
 
 
 class Workflows:
-    def __init__(self, result_llm=None):
-        self.result_llm = result_llm
+    def __init__(self):
         self.plugins = {}
         self._artifacts = {}
         self._commands = {}
@@ -45,7 +48,16 @@ class Workflows:
     def register(self, name, task: WorkflowTask):
         if name in self.plugins:
             raise ValueError(f'插件已注册：{name}')
+        if task.commands and task.followup is None:
+            raise ValueError(f'任务不支持结果追问：{name}')
+        if len(set(task.commands)) != len(task.commands) or any(command in self._commands for command in task.commands):
+            raise ValueError('追问命令已注册')
+        artifact_names = [artifact for artifact, _ in task.artifacts]
+        if len(set(artifact_names)) != len(artifact_names) or any(artifact in self._artifacts for artifact in artifact_names):
+            raise ValueError('产物已注册')
         self.plugins[name] = task
+        self._commands.update({command: name for command in task.commands})
+        self._artifacts.update(task.artifacts)
 
     def catalog(self):
         return [{
@@ -59,7 +71,10 @@ class Workflows:
         return task is not None and task.followup is not None
 
     def context(self, session):
-        return session.data.get('workflows', {}).get('followup_context')
+        context = session.data.get('workflows', {}).get('followup_context')
+        if context and self.supports_followup(context.get('target')):
+            return context
+        return None
 
     def clear_context(self, session):
         session.data.setdefault('workflows', {})['followup_context'] = None
@@ -82,7 +97,7 @@ class Workflows:
         reader = self._artifacts.get(name)
         return reader(session, task_id, algorithm) if reader else None
 
-    def run(self, session, text, request, emit):
+    def run(self, session, text, request, emit: Emit):
         messages = session.messages
         state = session.data.setdefault('workflows', {})
         connected = True
@@ -111,7 +126,7 @@ class Workflows:
             if not followup or target != request.get('target'):
                 state['followup_context'] = ({'target': target, 'message_index': len(messages) - 1}
                                              if plugin.followup else None)
-            use_model = self.result_llm is not None and reply.evidence is not None
+            use_model = plugin.result_llm is not None and reply.evidence is not None
             if followup and use_model:
                 followup_state = state.get('followup_context') or {'target': target}
                 state['followup_context'] = followup_state
@@ -119,7 +134,7 @@ class Workflows:
                 recent = [m.content[:500] for m in messages[start:-1] if isinstance(m, UserMessage)][-4:]
                 send({'type': 'progress', 'content': '正在根据登记结果回答'})
                 try:
-                    reply.content = self.result_llm.answer(text, reply.evidence, recent_questions=recent)
+                    reply.content = plugin.result_llm.answer(text, reply.evidence, recent_questions=recent)
                     reply.content = '**LLM 解读**\n\n' + reply.content
                 except Exception:
                     reply.content = '模型暂不可用，以下为登记结果。\n\n' + reply.content
@@ -129,7 +144,7 @@ class Workflows:
             send({'type': 'assistant', 'content': reply.content, 'workflow_result': True})
             if not followup and use_model:
                 try:
-                    explanation = self.result_llm.answer(text, reply.evidence, summary=True)
+                    explanation = plugin.result_llm.answer(text, reply.evidence, summary=True)
                     interpretation = '**LLM 解读**\n\n' + explanation
                 except Exception:
                     interpretation = 'LLM 解读暂不可用。'

@@ -15,8 +15,8 @@ from sklearn.metrics import adjusted_rand_score
 from sklearn.preprocessing import StandardScaler
 
 from agent.types import BaseTool, ToolResult
-from analysis.data import inference_feature
-from analysis.training import (RANDOM_STATE, RESOURCE_MEASUREMENT, cluster_summaries, clustering_metrics,
+from movielens_plugin.analysis.data import inference_feature
+from movielens_plugin.analysis.training import (RANDOM_STATE, RESOURCE_MEASUREMENT, cluster_summaries, clustering_metrics,
                                svg_plot)
 
 

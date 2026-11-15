@@ -1,0 +1,24 @@
+[project]
+name = "freud-movielens"
+version = "0.1.0"
+description = "MovieLens 数据治理与分析工作流插件"
+requires-python = ">=3.11"
+dependencies = [
+    "coding-agent",
+    "joblib>=1.4.0",
+    "numpy>=2.0.0",
+    "scikit-learn>=1.6.0",
+]
+
+[project.entry-points."freud.plugins"]
+movielens = "movielens_plugin:install_movie_lens"
+
+[project.scripts]
+freud-analysis-train = "movielens_plugin.analysis.training:main"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["movielens_plugin*"]

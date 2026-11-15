@@ -70,8 +70,6 @@ def default_runtime(config, store=None, llm_factory=None, mock=False):
 
 
 def install_workflows(runtime):
-    from agent.task_llm import TaskLLM
     from agent.workflows import Workflows
 
-    provider = runtime['models'].provider
-    runtime.provide('workflows', Workflows(TaskLLM(provider) if provider else None))
+    runtime.provide('workflows', Workflows())

@@ -5,6 +5,7 @@ from pathlib import Path
 from threading import Lock
 
 from agent.core import build_chat_system_prompt, build_memory_block
+from agent.events import Emit
 from agent.llm import MockLLM
 from agent.permissions import MODES
 from agent.session import Session, SessionMemory
@@ -85,19 +86,19 @@ class Conversations:
             with self.lock:
                 self.active.discard(session_id)
 
-    def run_workflow(self, session, text, request, emit):
+    def run_workflow(self, session, text, request, emit: Emit):
         if self.mock:
             emit({'type': 'error', 'content': 'Mock 模式不运行数据任务；请去掉 --mock 后重启。'})
             return
         with self._session_turn(session):
             self.workflows.run(session, text, request, emit)
 
-    def chat(self, session, text, emit, followup=False, permission_mode='ask', *, approve=None):
+    def chat(self, session, text, emit: Emit, followup=False, permission_mode='ask', *, approve=None):
         if permission_mode not in MODES:
             raise ValueError('权限模式无效')
         with self._session_turn(session) as workspace:
             context = self.workflows.context(session) if followup else None
-            if context and self.workflows.supports_followup(context.get('target')):
+            if context:
                 self.workflows.run(session, text, {'mode': 'followup', 'target': context['target']}, emit)
             else:
                 self._run_chat(session, text, emit, permission_mode, workspace, approve)

@@ -4,8 +4,8 @@ import json
 import uuid
 from pathlib import Path
 
-from analysis.reporting import classifier_metrics, cluster_metrics, reduction_metrics, split_lines, version_lines
-from analysis.tools import AnalysisRegistry, tool_catalog
+from movielens_plugin.analysis.reporting import classifier_metrics, cluster_metrics, reduction_metrics, split_lines, version_lines
+from movielens_plugin.analysis.tools import AnalysisRegistry, tool_catalog
 
 
 TASK_ALGORITHMS = {

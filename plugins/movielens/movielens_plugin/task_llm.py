@@ -4,8 +4,8 @@ import json
 import re
 
 from agent.types import SystemMessage, UserMessage
-from analysis.reporting import REDUCTION_METRIC_NOTE
-from governance.pipeline import REFERENCE_COUNTS
+from movielens_plugin.analysis.reporting import REDUCTION_METRIC_NOTE
+from movielens_plugin.governance.pipeline import REFERENCE_COUNTS
 
 
 def governance_evidence(report):

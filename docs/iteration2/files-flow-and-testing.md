@@ -4,12 +4,12 @@
 
 | 文件 | 作用 |
 | --- | --- |
-| `analysis/__init__.py` | 声明迭代二分析包。 |
-| `analysis/data.py` | 校验迭代一产物、加载 MovieLens 三表、按 `T1/T2` 切分、构造时间安全分类特征和训练期用户画像。 |
-| `analysis/training.py` | 训练六种算法，执行验证/测试评价，生成版本、模型、群体、坐标、指标、SVG 和 Markdown 报告。 |
-| `analysis/tools.py` | 将六种算法封装成独立 Agent 工具，只读取或登记实际结果，并处理自定义聚类/降维参数。 |
-| `analysis/service.py` | 识别任务，调用已登记的算法工具并返回进度，提供规则追问的结果依据。 |
-| `agent/movielens.py`、`agent/web.py` | 将训练和分析注册到 Freud，统一展示报告、追问和二维图。 |
+| `plugins/movielens/movielens_plugin/analysis/__init__.py` | 声明迭代二分析包。 |
+| `plugins/movielens/movielens_plugin/analysis/data.py` | 校验迭代一产物、加载 MovieLens 三表、按 `T1/T2` 切分、构造时间安全分类特征和训练期用户画像。 |
+| `plugins/movielens/movielens_plugin/analysis/training.py` | 训练六种算法，执行验证/测试评价，生成版本、模型、群体、坐标、指标、SVG 和 Markdown 报告。 |
+| `plugins/movielens/movielens_plugin/analysis/tools.py` | 将六种算法封装成独立 Agent 工具，只读取或登记实际结果，并处理自定义聚类/降维参数。 |
+| `plugins/movielens/movielens_plugin/analysis/service.py` | 识别任务，调用已登记的算法工具并返回进度，提供规则追问的结果依据。 |
+| `plugins/movielens/movielens_plugin/`、`agent/web.py` | 将训练和分析注册到 Freud，统一展示报告、追问和二维图。 |
 | `tests/test_analysis.py` | 构造版本化测试产物并验证契约、时间切分、六算法、参数化拟合、失败状态和 Agent 行为。 |
 | `docs/requirements/迭代二_分类聚类降维与分析Agent.md` | 保存迭代二需求原文。 |
 | `docs/iteration2/README.md` | 说明范围、依赖、运行方式、评价口径和结果目录。 |

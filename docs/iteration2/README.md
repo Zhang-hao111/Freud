@@ -28,13 +28,13 @@
 安装或同步依赖：
 
 ```bash
-uv sync
+uv sync --extra movielens
 ```
 
 训练并登记六种算法的实际结果：
 
 ```bash
-uv run freud-analysis-train \
+uv run --extra movielens freud-analysis-train \
   --iteration1-run governance-runs/<迭代一任务ID> \
   --output analysis-runs \
   --min-history 2 \
@@ -95,13 +95,13 @@ analysis-runs/
 专项测试命令：
 
 ```bash
-uv run python -m unittest tests.test_analysis -v
+uv run --extra movielens python -m unittest tests.test_analysis -v
 ```
 
 完整回归命令：
 
 ```bash
-uv run python -m unittest discover -s tests -v
+uv run --extra movielens python -m unittest discover -s tests -v
 ```
 
 测试使用带真实哈希、数据版本和 `T1/T2` 的小型 MovieLens 格式数据，实际运行 `scikit-learn` 训练、预测、聚类和降维，不使用 mock 模型。该数据用于控制资源开销和验证行为，不代表 MovieLens 1M 全量评价结果；全量指标必须以用户自己的迭代一全量成功产物重新训练后生成。

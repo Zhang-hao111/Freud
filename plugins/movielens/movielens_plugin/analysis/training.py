@@ -22,9 +22,9 @@ from sklearn.metrics import (accuracy_score, adjusted_rand_score, confusion_matr
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-from analysis.data import (FEATURE_VERSION, PROFILE_VERSION, IterationOneDataset,
+from movielens_plugin.analysis.data import (FEATURE_VERSION, PROFILE_VERSION, IterationOneDataset,
                            event_features, user_profiles)
-from analysis.reporting import training_details, training_overview
+from movielens_plugin.analysis.reporting import training_details, training_overview
 
 
 CLASSIFIERS = ("logistic_regression", "random_forest")

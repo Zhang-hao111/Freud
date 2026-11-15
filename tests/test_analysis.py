@@ -9,10 +9,10 @@ from unittest.mock import patch
 import joblib
 from sklearn.cluster import KMeans
 
-from analysis.data import IterationOneDataset, digest, event_features, user_profiles
-from analysis.tools import AnalysisRegistry, tool_catalog
-from analysis.training import AnalysisTrainer, classification_metrics
-from analysis.service import AnalysisService, grounded_follow_up
+from movielens_plugin.analysis.data import IterationOneDataset, digest, event_features, user_profiles
+from movielens_plugin.analysis.tools import AnalysisRegistry, tool_catalog
+from movielens_plugin.analysis.training import AnalysisTrainer, classification_metrics
+from movielens_plugin.analysis.service import AnalysisService, grounded_follow_up
 
 
 def create_iteration1_run(root, short_user=False):
@@ -115,7 +115,7 @@ class AnalysisTests(unittest.TestCase):
             run_dir = Path(directory)
             (run_dir / "models").mkdir()
             trainer = AnalysisTrainer(self.iteration1_run, run_dir)
-            with patch("analysis.training.classification_metrics", side_effect=check):
+            with patch("movielens_plugin.analysis.training.classification_metrics", side_effect=check):
                 trainer._train_classifiers(run_dir, matrices, targets)
 
     def test_training_registers_six_algorithms_and_artifacts(self):
@@ -174,13 +174,13 @@ class AnalysisTests(unittest.TestCase):
                              kmeans["metrics"]["silhouette"])
 
     def test_classification_does_not_load_profiles(self):
-        from analysis.tools import load_json
+        from movielens_plugin.analysis.tools import load_json
 
         def without_profiles(path):
             self.assertNotEqual(Path(path).name, "profiles.json")
             return load_json(path)
 
-        with patch("analysis.tools.load_json", side_effect=without_profiles):
+        with patch("movielens_plugin.analysis.tools.load_json", side_effect=without_profiles):
             registry = AnalysisRegistry(self.output_dir)
             result = tool_catalog(registry)["logistic_regression"].execute({"user_id": 1, "movie_id": 10})
         self.assertTrue(result.success, result.error)

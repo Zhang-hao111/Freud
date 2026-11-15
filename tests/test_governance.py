@@ -6,11 +6,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from governance.pipeline import HadoopGovernanceTool, HadoopPipeline, cutoff, validate_references
-from governance.service import explain
+from movielens_plugin.governance.pipeline import HadoopGovernanceTool, HadoopPipeline, cutoff, validate_references
+from movielens_plugin.governance.service import explain
+from movielens_plugin.governance import worker
 
 
-WORKER = Path(__file__).resolve().parent.parent / "governance" / "worker.py"
+WORKER = Path(worker.__file__)
 
 
 class GovernanceWorkerTests(unittest.TestCase):
