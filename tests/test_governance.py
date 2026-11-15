@@ -1,4 +1,3 @@
-import io
 import json
 import os
 import subprocess
@@ -8,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from governance.pipeline import HadoopGovernanceTool, HadoopPipeline, cutoff, validate_references
-from governance.web import Handler, explain
+from governance.service import explain
 
 
 WORKER = Path(__file__).resolve().parent.parent / "governance" / "worker.py"
@@ -65,6 +64,20 @@ class GovernanceWorkerTests(unittest.TestCase):
         cleaned = json.loads(self.worker("clean-map", audited))
         self.assertEqual(cleaned["action"], "quarantine")
         self.assertIn("reference", cleaned["issues"])
+
+    def test_metadata_pass_outputs_same_entity_decisions_without_ratings(self):
+        mapped = []
+        for table, raw in (
+            ("movies", b"10::Film (2000)::Drama\n10::Film (2000)::Drama\n"),
+            ("users", b"1::M::25::12::00501\n"),
+            ("ratings", b"1::10::5::1014854400\n"),
+        ):
+            mapped += self.worker("audit-map", raw, f"/input/{table}.dat").splitlines(keepends=True)
+        audit = self.worker("audit-reduce", b"".join(sorted(mapped)))
+        full = self.worker("clean-map", audit).splitlines()
+        metadata = self.worker("clean-metadata-map", audit).splitlines()
+        self.assertEqual(metadata, [line for line in full if json.loads(line)["table"] != "ratings"])
+        self.assertEqual({json.loads(line)["table"] for line in metadata}, {"users", "movies"})
 
     def test_cleaned_reference_validation_rejects_orphans(self):
         (self.directory / "ratings.dat").write_text("1::10::5::1014854400\n3::10::4::1014854401\n")
@@ -134,20 +147,6 @@ class GovernanceWorkerTests(unittest.TestCase):
         version = explain(report, "评分版本、数据版本和 T1/T2 是什么？")
         self.assertIn("评分版本 scores-v1", version)
         self.assertNotIn("Accurate：", version)
-
-    def test_request_body_must_be_json_object(self):
-        self.assertEqual(self.body_json(b'{"prompt":"clean"}'), {"prompt": "clean"})
-        for payload in (b"[]", b"null", b'"text"'):
-            with self.subTest(payload=payload):
-                with self.assertRaisesRegex(ValueError, "必须是对象"):
-                    self.body_json(payload)
-
-    @staticmethod
-    def body_json(payload):
-        handler = object.__new__(Handler)
-        handler.headers = {"Content-Length": str(len(payload))}
-        handler.rfile = io.BytesIO(payload)
-        return handler.body_json()
 
     @staticmethod
     def report():

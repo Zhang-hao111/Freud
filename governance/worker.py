@@ -134,12 +134,14 @@ def audit_reduce():
     emit_group(group)
 
 
-def clean_map():
-    references = reference_ids()
+def clean_map(metadata_only=False):
+    references = {} if metadata_only else reference_ids()
     for line in sys.stdin:
         record = json.loads(line)
-        issues = set(record["issues"])
         table = record["table"]
+        if metadata_only and table == "ratings":
+            continue
+        issues = set(record["issues"])
         if table == "ratings" and record["value"]:
             user_id, movie_id = map(int, record["value"].split("::")[:2])
             if user_id not in references["users"] or movie_id not in references["movies"]:
@@ -232,5 +234,6 @@ def score_reduce():
 
 if __name__ == "__main__":
     {"audit-map": audit_map, "audit-reduce": audit_reduce, "clean-map": clean_map,
+     "clean-metadata-map": lambda: clean_map(metadata_only=True),
      "score-map": score_map, "score-combine": score_combine,
      "score-reduce": score_reduce}[sys.argv[1]]()

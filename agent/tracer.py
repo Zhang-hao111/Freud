@@ -47,7 +47,7 @@ class Tracer:
 
         filepath = os.path.join(
             self.traces_dir,
-            f'trace-{int(time.time())}.json',
+            f'trace-{time.time_ns()}.json',
         )
         with open(filepath, 'w', encoding='utf-8') as f:
             json.dump(

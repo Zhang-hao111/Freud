@@ -8,13 +8,13 @@
 | `analysis/data.py` | 校验迭代一产物、加载 MovieLens 三表、按 `T1/T2` 切分、构造时间安全分类特征和训练期用户画像。 |
 | `analysis/training.py` | 训练六种算法，执行验证/测试评价，生成版本、模型、群体、坐标、指标、SVG 和 Markdown 报告。 |
 | `analysis/tools.py` | 将六种算法封装成独立 Agent 工具，只读取或登记实际结果，并处理自定义聚类/降维参数。 |
-| `analysis/web.py` | 实现自然语言任务识别、双算法默认调用、异步状态、追问和 HTTP API。 |
-| `analysis/index.html` | 提供问题输入、状态、三类结果、实验对照、局限、追问、报告、JSON 和二维图页面。 |
+| `analysis/service.py` | 识别任务，调用已登记的算法工具并返回进度，提供规则追问的结果依据。 |
+| `agent/movielens.py`、`agent/web.py` | 将训练和分析注册到 Freud，统一展示报告、追问和二维图。 |
 | `tests/test_analysis.py` | 构造版本化测试产物并验证契约、时间切分、六算法、参数化拟合、失败状态和 Agent 行为。 |
 | `docs/requirements/迭代二_分类聚类降维与分析Agent.md` | 保存迭代二需求原文。 |
 | `docs/iteration2/README.md` | 说明范围、依赖、运行方式、评价口径和结果目录。 |
 | `docs/iteration2/files-flow-and-testing.md` | 说明本文件表、整体流程、接口、验收矩阵和演示脚本。 |
-| `pyproject.toml` | 增加 NumPy、Joblib、scikit-learn 依赖及两个迭代二命令入口。 |
+| `pyproject.toml` | 增加 NumPy、Joblib、scikit-learn 依赖和离线训练命令入口。 |
 | `uv.lock` | 固定实际解析的依赖版本。 |
 | `.gitignore` | 忽略本地 `analysis-runs/` 训练产物。 |
 
@@ -66,20 +66,25 @@ flowchart TD
 
 | 方法与路径 | 用途 |
 | --- | --- |
-| `POST /api/jobs` | 创建分类、聚类或降维任务。 |
-| `GET /api/jobs/<任务ID>` | 查询状态、阶段、失败原因或实际结果。 |
-| `POST /api/jobs/<任务ID>/ask` | 依据该任务实际结果回答追问。 |
-| `GET /api/jobs/<任务ID>/report` | 获取本次训练评价报告。 |
-| `GET /api/jobs/<任务ID>/sample` | 获取本次查询实际结果 JSON。 |
-| `GET /api/jobs/<任务ID>/plot/<算法>` | 获取该降维算法的 SVG 图。 |
+| `POST /api/workflow` | 指定会话、`mode: "analysis"` 和 `text`，以 NDJSON 返回状态和结果。 |
+| `POST /api/chat` | 传 `followup: true` 在当前会话依据实际结果追问。 |
+| `GET /api/workflows/{session_id}/training-report/{task_id}` | 获取登记的训练评价报告。 |
+| `GET /api/workflows/{session_id}/analysis-report/{task_id}` | 获取登记的查询报告。 |
+| `GET /api/workflows/{session_id}/plot/{task_id}/{algorithm}` | 获取对应算法的降维图。 |
+
+下列请求共用 `POST /api/workflow`，`session_id` 由 `POST /api/sessions` 创建。
 
 分类请求示例：
 
 ```json
 {
-  "prompt": "请用两种分类算法预测是否会给高分",
-  "user_id": 1,
-  "movie_id": 10
+  "session_id": "会话 ID",
+  "mode": "analysis",
+  "text": "请用两种分类算法预测是否会给高分",
+  "options": {
+    "user_id": 1,
+    "movie_id": 10
+  }
 }
 ```
 
@@ -87,10 +92,21 @@ flowchart TD
 
 ```json
 {
-  "prompt": "请用 K-Means 聚类用户",
-  "user_ids": [1, 2, 3],
-  "algorithm": "kmeans",
-  "parameters": {"n_clusters": 3, "n_init": 20}
+  "session_id": "会话 ID",
+  "mode": "analysis",
+  "text": "请用 K-Means 聚类用户",
+  "options": {
+    "user_ids": [
+      1,
+      2,
+      3
+    ],
+    "algorithm": "kmeans",
+    "parameters": {
+      "n_clusters": 3,
+      "n_init": 20
+    }
+  }
 }
 ```
 
@@ -98,12 +114,23 @@ flowchart TD
 
 ```json
 {
-  "prompt": "请用 PCA 降维并与 DBSCAN 对照",
-  "user_ids": [1, 2, 3],
-  "algorithm": "pca",
-  "target_dimensions": 2,
-  "cluster_algorithm": "dbscan",
-  "cluster_parameters": {"eps": 1.5, "min_samples": 2}
+  "session_id": "会话 ID",
+  "mode": "analysis",
+  "text": "请用 PCA 降维并与 DBSCAN 对照",
+  "options": {
+    "user_ids": [
+      1,
+      2,
+      3
+    ],
+    "algorithm": "pca",
+    "target_dimensions": 2,
+    "cluster_algorithm": "dbscan",
+    "cluster_parameters": {
+      "eps": 1.5,
+      "min_samples": 2
+    }
+  }
 }
 ```
 
@@ -118,7 +145,7 @@ flowchart TD
 | 降维 | PCA/SVD、目标维数、信息阈值、K-Means/DBSCAN 对照、ARI、耗时、内存、SVG |
 | 登记与产物 | 六个模型、画像、群体、坐标、报告、版本、参数化查询目录 |
 | Agent | 默认双算法、指定单算法、失败状态、追问只引用本次结果 |
-| HTTP | 创建/轮询、报告、样例、图表、追问、400/404/409 与未知用户失败 |
+| HTTP | 会话与进度事件、报告、样例、图表、追问、输入或任务失败 |
 | 前端 | 分类结果、降维对照、状态、指标、版本、局限、追问、SVG 加载和控制台错误 |
 
 专项测试实际使用 8 个用户、8 部电影、80 条评分，训练/验证/测试分别为 48/16/16。它验证真实算法链路但不是 MovieLens 1M 全量实验，因此演示时必须称为“小型真实验收数据”，不能把其中指标表述为全量结果。

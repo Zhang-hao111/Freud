@@ -193,6 +193,19 @@ class OpenAIProvider:
     def build_tool_definitions(self, tools: list[BaseTool]) -> list[dict]:
         return build_tool_definitions(tools)
 
+    def complete_text(self, messages: list[Message]) -> str:
+        """为结果解读生成简短文本，不提供工具。"""
+        response = self.client.with_options(timeout=20, max_retries=0).chat.completions.create(
+            model=self.model,
+            messages=self._convert_messages(messages),
+            temperature=0,
+            max_tokens=500,
+        )
+        content = response.choices[0].message.content
+        if not content or not content.strip():
+            raise ValueError("LLM 返回空回复")
+        return content.strip()
+
 
 # ---- Mock LLM ----
 

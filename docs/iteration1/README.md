@@ -11,18 +11,16 @@
 ```bash
 export HADOOP_STREAMING_JAR=/path/to/hadoop-streaming-3.x.x.jar
 uv sync
-uv run freud-governance --host 127.0.0.1 --port 8765
+uv run freud-web
 ```
 
-打开 `http://127.0.0.1:8765/`，输入清洗及评估需求即可启动完整任务。也可通过 `--source`、`--output`、`--hadoop`、`--hdfs-root`、`--python-command` 配置路径和命令。Web API：
+首次运行先按[总 README](../../README.md#网页交互)构建前端。打开 `http://127.0.0.1:8875/`，从「＋ 数据任务」选择「清洗与质量评估」。可用 `HADOOP_CMD`、`GOVERNANCE_HDFS_ROOT`、`HADOOP_PYTHON` 配置 Hadoop。
 
 | 接口 | 用途 |
 | --- | --- |
-| `POST /api/jobs`，`{"prompt":"请清洗并评估 MovieLens 1M"}` | 启动任务，返回任务标识与运行状态；可附带 `source_version`、`rule_version`、`score_version` |
-| `GET /api/jobs/{id}` | 查询阶段、失败原因及完成后的实际报告 |
-| `POST /api/jobs/{id}/ask`，`{"question":"唯一性如何变化？"}` | 基于该报告追问 |
-| `GET /api/jobs/{id}/report` | 下载 Markdown 报告 |
-| `GET /api/jobs/{id}/sample` | 查看清洗后的评分样例 |
+| `POST /api/workflow`，指定 `session_id`、`mode: "governance"`、`text` | 以 NDJSON 返回进度、结果或失败。可在 `options` 里提供原始数据、清洗规则和评分方案版本 |
+| `POST /api/chat`，指定 `session_id`、`text` 和 `followup: true` | 在同一会话基于登记结果追问 |
+| `GET /api/workflows/{session_id}/governance-report/{task_id}` | 下载当前会话已登记的治理报告，含清洗后三表样例 |
 
 仅登记了一套默认清洗和评分方案；未指定版本时使用默认方案，指定版本必须匹配已登记版本。原始数据版本不匹配时任务失败。服务会明确报告 Hadoop 缺失、作业失败或输出为空，不会生成模拟分数。
 

@@ -44,13 +44,7 @@ uv run freud-analysis-train \
   --target-dimensions 2
 ```
 
-启动分析 Agent 和前端：
-
-```bash
-uv run freud-analysis --results analysis-runs --host 127.0.0.1 --port 8865
-```
-
-浏览器访问 `http://127.0.0.1:8865/`。该功能不调用外部大模型，也不消耗大模型 API Token；自然语言任务识别和追问均只基于已登记结果。
+训练也可以直接在 Freud 网页完成。按[总 README](../../README.md#网页交互)构建并启动 `freud-web`，浏览器访问 `http://127.0.0.1:8875/`，在同一会话中查看六种算法总览、查询结果、报告和图表。任务工具使用已登记结果，配置 LLM 后可基于这些证据进行解读和追问。
 
 ## 数据与评价口径
 

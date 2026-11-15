@@ -169,6 +169,11 @@ class SessionStore:
         session.save()
         return session
 
+    def delete(self, session: Session):
+        if session.path.name.startswith('session-legacy-'):
+            (self.dir / '.legacy-imported').touch()
+        session.path.unlink()
+
     def list(self) -> list[Session]:
         """按最近更新时间倒序返回全部会话。"""
         if not self.dir.exists():
@@ -184,7 +189,7 @@ class SessionStore:
 
     def _import_legacy(self):
         """旧版全局 memory.json 非空且尚无会话时，导入为一个遗留会话。"""
-        if self.dir.exists() and any(self.dir.glob('session-*.json')):
+        if (self.dir / '.legacy-imported').exists() or (self.dir.exists() and any(self.dir.glob('session-*.json'))):
             return
         if not LEGACY_MEMORY.exists():
             return

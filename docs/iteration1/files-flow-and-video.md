@@ -23,16 +23,16 @@
 
 | 迭代一要求 | 实现入口 | 主要证据 |
 | --- | --- | --- |
-| 一次自然语言请求自动完成任务 | `GovernanceAgent.start()` | `POST /api/jobs` 返回任务 ID，后台自动执行全部阶段 |
+| 一次自然语言请求自动完成任务 | `GovernanceService.run()` | `POST /api/workflow` 自动执行全部阶段，直接流式返回进度 |
 | Hadoop 执行检查、清洗和前后评分 | `HadoopPipeline`、`worker.py` | Streaming 作业目录中的 `_SUCCESS`、`part-00000` 与本地合并产物 |
-| 展示运行、完成和失败状态 | `GovernanceAgent`、`index.html` | `running/completed/failed` 和当前阶段；失败时保存 `failure.json` |
+| 展示运行、完成和失败状态 | `GovernanceService`、Freud 网页 | 进度、最终回复或失败原因；失败时保存 `failure.json` |
 | 五维前后评分使用同一口径 | `score-map/score-combine/score-reduce` | `score-before.jsonl`、`score-after.jsonl`、报告中的前后分数 |
 | 区分修复、去重、隔离 | `clean_map()`、`split_clean()` | `actions` 计数、处置样例和只包含真正隔离项的 `quarantine.jsonl` |
 | 提供数据版本、规则版本和任务标识 | `pipeline.py` | `task_id`、`source_version`、`data_version`、`rule_version`、`score_version` |
 | 生成并登记 `T1/T2` | `cutoff()` | 清洗后有效评分的 80%/90% 时间分位日末，且必须满足 `T1<T2` |
-| 支持基于实际结果追问 | `explain()`、`POST /api/jobs/{id}/ask` | 回答只读取当前任务报告，不调用占位数据 |
-| 查看报告和清洗样例 | `GET .../report`、`GET .../sample` | Markdown 报告下载和清洗后评分样例 |
-| 未完成或失败时不得伪造结果 | `HadoopGovernanceTool.execute()`、Web 状态判断 | Hadoop 错误原样转成失败状态；未完成追问返回 HTTP 409 |
+| 支持基于实际结果追问 | `explain()`、`POST /api/chat` | 从当前会话登记报告回复，配置 LLM 后可基于报告解读 |
+| 查看报告和清洗样例 | 对话结果和报告链接 | Markdown 报告下载和清洗后样例 |
+| 未完成或失败时不得伪造结果 | `HadoopGovernanceTool.execute()`、Web 状态判断 | Hadoop 错误转成包含失败阶段的消息 |
 
 ## 3. 迭代一文件说明
 
@@ -43,7 +43,7 @@
 | `docs/requirements/迭代一_Hadoop数据清洗与Agent基础.md` | 迭代一的需求原文，是功能、展示、可信度和验收范围的最高依据。 |
 | `docs/requirements/引言_项目总体要求与汇报安排.md` | 给出三轮迭代的衔接要求、MovieLens 1M 数据说明、提交内容和约 10 分钟汇报要求；迭代一需要固定后续使用的数据版本与 `T1/T2`。 |
 | `README.md` | 仓库总入口，只介绍 Freud 项目的作用、依赖、配置与通用操作方式，不承载迭代一专项说明。 |
-| `pyproject.toml` | 声明 Python 版本、安装依赖、打包范围和 `freud-governance = governance.web:main` 命令；同时把 `governance/index.html` 打进安装包。 |
+| `pyproject.toml` | 声明 Python 版本、安装依赖、打包范围和统一网页入口 `freud-web`。 |
 | `.gitignore` | 忽略 `config.json`、运行报告目录等本地敏感或运行期文件，避免 API Key 和大量产物被误提交。 |
 
 ### 3.2 治理源码
@@ -53,8 +53,8 @@
 | `governance/__init__.py` | 标记 `governance` 为 Python 包；不包含业务逻辑。 |
 | `governance/worker.py` | Hadoop Streaming worker。实现三表解析、字段/值域/时间/外键校验、业务键分组、确定性重复处理、清洗动作分类，以及五维评分的 map/combine/reduce。 |
 | `governance/pipeline.py` | 端到端编排器。负责上传、启动 Streaming 作业、合并结果、拆分清洗数据、记录哈希版本、核对记录守恒、生成 `T1/T2`、写 JSON/Markdown 报告，并通过 `HadoopGovernanceTool` 暴露为 Agent 工具。 |
-| `governance/web.py` | Web 服务和受约束的治理 Agent。校验自然语言请求和版本参数，后台执行工具、记录阶段、提供任务/报告/样例/追问 API；追问答案严格来自任务报告。 |
-| `governance/index.html` | 无前端框架的单页界面。提交提示词、轮询状态、展示五维变化、处置数量、版本、边界、样例、依据和局限，并提供报告下载与追问输入。 |
+| `governance/service.py` | 校验清洗请求和版本参数，调用 Hadoop 工具并返回报告和进度。 |
+| `agent/movielens.py`、`agent/web.py` | 注册治理插件，通过 Freud 会话提供进度、样例、报告和追问。 |
 | `agent/types.py` | 提供 `BaseTool` 与 `ToolResult` 通用类型；`HadoopGovernanceTool` 继承和返回这些类型。除此之外，通用 Coding Agent 的 ReAct、终端和文件工具不进入本轮 Web 治理数据流。 |
 
 ### 3.3 测试与说明文件
@@ -81,9 +81,8 @@
 | --- | --- |
 | `audit-before.jsonl` | 清洗前逐条审计结果，包括原始值、规范值和异常标签。 |
 | `score-before.jsonl` | Hadoop 聚合后的清洗前总数、表计数、异常计数、维度分子/分母、日期分布和五维得分。 |
-| `clean-initial.jsonl` | 第一次清洗判定，用于先生成有效用户和电影引用集合。 |
+| `clean-initial.jsonl` | 首轮用户、电影两张表的清洗判定，用于生成有效实体引用。 |
 | `references/users.dat`、`references/movies.dat` | 第一次清洗后保留的实体引用；第二次清洗据此重新检查评分外键。 |
-| `references/ratings.dat` | 引用准备阶段的空占位文件；评分引用不用于实体集合。 |
 | `clean-final.jsonl` | 最终逐条处置结果；每条记录明确标记 `keep`、`repair`、`deduplicate` 或 `quarantine`。 |
 | `cleaned/users.dat`、`movies.dat`、`ratings.dat` | 清洗后有效数据；`keep` 和 `repair` 项进入这些文件。 |
 | `cleaned/quarantine.jsonl` | 只保存 `quarantine` 项。去重记录不会混入此文件，避免把“去重”误报为“隔离”。 |
@@ -96,8 +95,8 @@
 
 ### 3.6 不进入迭代一治理主流程的文件
 
-- `config.json`、`agent/llm.py` 和 PackyAPI/DeepSeek 配置服务于通用 `freud` Coding Agent，不被 `freud-governance` 的 Hadoop 治理 Web 流程读取。
-- 当前治理追问由 `explain()` 根据实际报告组合，不消耗外部模型 Token，也不会把报告或 API Key发送给第三方。
+- Hadoop 计算和评分可在未配置模型的环境运行。模型配置只用于普通聊天及可选的结果解读。
+- 启用 LLM 后会把问题和相关报告指标交给配置的模型。无模型时可使用 `explain()` 依据登记报告回复。
 - 演示时不要打开 `config.json`，不要在终端历史、浏览器地址栏或视频字幕中展示 API Key。
 - `docs/design.md`、`docs/debug-log-lab2.md` 主要描述通用 Coding Agent，不是迭代一 Hadoop 验收证据。
 
@@ -105,15 +104,15 @@
 
 ### 4.1 从页面到 Agent 工具
 
-1. 用户在页面输入自然语言请求，点击“开始清洗与评估”。
-2. 页面向 `POST /api/jobs` 发送 `prompt`，可选携带原始数据、清洗规则和评分规则版本。
-3. `GovernanceAgent.start()` 验证：
+1. 用户在 Freud 对话选择「清洗与质量评估」并发送自然语言请求。
+2. 页面向 `POST /api/workflow` 发送会话标识、任务类型和文本。接口支持可选的版本参数。
+3. `GovernanceService.run()` 验证：
    - 提示词必须是非空文本；
    - 目标必须与 MovieLens 清洗、治理或五维评估有关；
    - 当前只接受已登记的默认规则版本；
    - 指定的原始版本必须是 16 位十六进制版本号。
-4. Agent 生成 32 位任务 ID，返回 `running`，并在线程中启动 `HadoopGovernanceTool`。
-5. 页面按任务 ID 轮询 `GET /api/jobs/{id}`，显示当前阶段；未完成时不显示结果卡片。
+4. 治理服务生成 32 位任务 ID，并调用 `HadoopGovernanceTool`。
+5. 页面接收进度事件，任务完成后显示报告和样例。
 
 ### 4.2 Hadoop 内部数据流
 
@@ -129,7 +128,7 @@
         │    score-map → score-combine → score-reduce
         │
         ├─ clean-initial
-        │    clean-map → 生成有效 users/movies 引用
+        │    clean-metadata-map → 只输出 users/movies 清洗记录并生成有效引用
         │
         ├─ clean-final
         │    clean-map → keep / repair / deduplicate / quarantine
@@ -213,7 +212,7 @@
 - 报告下载和清洗后评分样例；
 - 基于当前报告的追问回答。
 
-任务未完成时追问返回 HTTP 409；任务不存在返回 404；非法 JSON、无关提示词或未登记规则返回 400。
+当前网页在会话中返回任务失败和缺少结果等状态。未登记的规则会在执行前拒绝。
 
 ## 5. 2026-09-29 实际测试记录
 
@@ -332,19 +331,16 @@ python3 --version
 
 本地模式和集群模式都必须实际执行 `hadoop jar ... hadoop-streaming-*.jar`。如果只直接运行 `worker.py`，那是单元测试，不是 Hadoop 端到端测试。
 
-### 6.3 启动治理页面
+### 6.3 从统一网页启动治理
+
+按[总 README](../../README.md#网页交互)构建前端后：
 
 ```bash
 export HADOOP_STREAMING_JAR=/path/to/hadoop-streaming-3.x.x.jar
-uv run freud-governance \
-  --source ml-1m/ml-1m \
-  --output governance-runs \
-  --hadoop hadoop \
-  --hdfs-root /freud/governance \
-  --python-command python3
+uv run freud-web
 ```
 
-打开 `http://127.0.0.1:8765/`。如果使用真实集群，`--hdfs-root` 必须是集群可访问路径；如果演示本地模式，应在画面或讲解中明确说明不是分布式 HDFS/YARN。
+打开 `http://127.0.0.1:8875/`，选择「清洗与质量评估」。使用 HDFS 时可设置 `GOVERNANCE_HDFS_ROOT` 为集群可访问路径。演示 Hadoop 本地模式时应说明所用环境。
 
 ## 7. 演示视频总原则
 
@@ -387,7 +383,7 @@ uv run freud-governance \
 
 ### 2:05—2:35：提交主提示词
 
-**画面**：完整显示提示词，点击一次“开始清洗与评估”。
+**画面**：选择「清洗与质量评估」，完整显示提示词并发送一次。
 
 **主提示词**：
 
@@ -405,7 +401,7 @@ uv run freud-governance \
 
 **讲解词**：
 
-> 页面持续轮询任务状态。底层实际调用 Hadoop Streaming：先审计原始数据，再聚合清洗前评分；随后先建立有效实体引用，再复核评分外键和最终处置；最后对清洗数据运行同一套审计和评分。只有 Hadoop 作业成功、记录对账成立并能生成严格递增的 `T1/T2`，任务才会变成完成。
+> 网页持续接收任务阶段。底层实际调用 Hadoop Streaming：先审计原始数据，再聚合清洗前评分；随后先建立有效实体引用，再复核评分外键和最终处置；最后对清洗数据运行同一套审计和评分。只有 Hadoop 作业成功、记录对账成立并能生成严格递增的 `T1/T2`，任务才会变成完成。
 
 如果是本地模式，补充：
 
@@ -447,11 +443,11 @@ uv run freud-governance \
 
 **讲解词**：
 
-> 追问不会凭空调用示例答案，而是只读取当前任务的 `report.json`。任务未完成时接口返回 409，不会提前编造分数。可以追问分数、数量、处置样例、未解决问题和版本边界。
+> 追问依据当前任务的 `report.json`。已配置模型时可对这些证据作解释，任务没有产物时会显示结果不可用。可以追问分数、数量、处置样例、未解决问题和版本边界。
 
 ### 8:50—9:30：测试与失败态
 
-**画面**：展示专项测试 9/9 通过的终端结果，再展示一张事先实际截取的失败态，或现场向错误环境启动一个独立任务。不要破坏刚完成的成功任务。
+**画面**：展示当前专项测试的实际终端结果，再展示一张事先实际截取的失败态，或现场向错误环境启动一个独立任务。不要破坏刚完成的成功任务。
 
 **讲解词**：
 

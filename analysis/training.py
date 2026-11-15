@@ -8,6 +8,7 @@ import tracemalloc
 import uuid
 from collections import defaultdict
 from pathlib import Path
+from threading import Lock
 
 import joblib
 import numpy as np
@@ -23,6 +24,7 @@ from sklearn.preprocessing import StandardScaler
 
 from analysis.data import (FEATURE_VERSION, PROFILE_VERSION, IterationOneDataset,
                            event_features, user_profiles)
+from analysis.reporting import training_details, training_overview
 
 
 CLASSIFIERS = ("logistic_regression", "random_forest")
@@ -30,6 +32,7 @@ CLUSTERERS = ("kmeans", "dbscan")
 REDUCERS = ("pca", "truncated_svd")
 EXPERIMENT_VERSION = "ml1m-analysis-experiment-v2"
 RANDOM_STATE = 20260930
+RESOURCE_MEASUREMENT = Lock()
 
 
 def json_ready(value):
@@ -98,7 +101,7 @@ def cluster_summaries(labels, profiles):
             "representative_user_ids": user_ids[:5],
             "top_genres": [{"genre": genre, "mean_rating": round(score, 4)}
                            for genre, score in top_genres],
-            "description": ("噪声点：与已识别群体均不接近" if label == -1 else
+            "description": ("噪声点：按当前参数未分配群体" if label == -1 else
                             "偏好类型：" + "、".join(genre for genre, _ in top_genres)),
         }
     return summaries
@@ -178,9 +181,9 @@ class AnalysisTrainer:
             (run_dir / "profiles.json").write_text(
                 json.dumps(json_ready(profile_payload), ensure_ascii=False, indent=2), encoding="utf-8")
             notify("运行两种聚类算法")
-            clustering, scaled_profiles, profile_scaler = self._train_clusters(run_dir, profiles)
+            clustering, scaled_profiles, profile_scaler, kmeans_baseline = self._train_clusters(run_dir, profiles)
             notify("运行两种降维与聚类对照")
-            reduction = self._train_reducers(run_dir, profiles, scaled_profiles, profile_scaler)
+            reduction = self._train_reducers(run_dir, profiles, scaled_profiles, profile_scaler, kmeans_baseline)
             analysis_version = hashlib.sha256(json.dumps({
                 "data_version": self.dataset.report["data_version"],
                 "experiment_version": EXPERIMENT_VERSION,
@@ -291,6 +294,7 @@ class AnalysisTrainer:
         for name, (model, parameters) in definitions.items():
             started = time.perf_counter()
             labels = model.fit_predict(scaled)
+            fit_seconds = time.perf_counter() - started
             model_path = run_dir / "models" / f"{name}.joblib"
             joblib.dump({"scaler": scaler, "model": model}, model_path)
             result_path = run_dir / "clusters" / f"{name}.json"
@@ -312,27 +316,32 @@ class AnalysisTrainer:
             results[name] = {key: value for key, value in payload.items()
                              if key not in {"assignments", "summaries"}}
             results[name]["result_path"] = str(result_path.relative_to(run_dir))
-        return {"algorithms": results}, scaled, scaler
+            if name == "kmeans":
+                baseline = {"labels": labels, "assignments": payload["assignments"],
+                            "parameters": parameters, "silhouette": payload["metrics"]["silhouette"],
+                            "fit_seconds": round(fit_seconds, 6)}
+        return {"algorithms": results}, scaled, scaler, baseline
 
-    def _train_reducers(self, run_dir, profiles, scaled_profiles, profile_scaler):
+    def _train_reducers(self, run_dir, profiles, scaled_profiles, profile_scaler, baseline):
         maximum = min(self.target_dimensions, scaled_profiles.shape[1], len(scaled_profiles) - 1)
-        cluster_count = min(self.clusters, len(profiles["user_ids"]) - 1)
-        original_cluster = KMeans(n_clusters=cluster_count, n_init=20,
-                                  random_state=RANDOM_STATE).fit_predict(scaled_profiles)
+        cluster_parameters = baseline["parameters"]
         definitions = {
             "pca": PCA(n_components=maximum, random_state=RANDOM_STATE),
             "truncated_svd": TruncatedSVD(n_components=maximum, random_state=RANDOM_STATE),
         }
         results = {}
         for name, model in definitions.items():
-            tracemalloc.start()
-            started = time.perf_counter()
-            coordinates = model.fit_transform(scaled_profiles)
-            reduced_cluster = KMeans(n_clusters=cluster_count, n_init=20,
-                                     random_state=RANDOM_STATE).fit_predict(coordinates)
-            elapsed = time.perf_counter() - started
-            _, peak_bytes = tracemalloc.get_traced_memory()
-            tracemalloc.stop()
+            with RESOURCE_MEASUREMENT:
+                tracemalloc.start()
+                try:
+                    started = time.perf_counter()
+                    coordinates = model.fit_transform(scaled_profiles)
+                    reduced_started = time.perf_counter()
+                    reduced_cluster = KMeans(**cluster_parameters).fit_predict(coordinates)
+                    finished = time.perf_counter()
+                    _, peak_bytes = tracemalloc.get_traced_memory()
+                finally:
+                    tracemalloc.stop()
             information = float(np.sum(model.explained_variance_ratio_))
             model_path = run_dir / "models" / f"{name}.joblib"
             joblib.dump({"scaler": profile_scaler, "model": model}, model_path)
@@ -354,20 +363,20 @@ class AnalysisTrainer:
                 "coordinates": {str(user_id): [round(float(value), 8) for value in row]
                                 for user_id, row in zip(profiles["user_ids"], coordinates)},
                 "cluster_comparison": {
-                    "algorithm": "kmeans", "clusters": cluster_count,
-                    "original_silhouette": clustering_metrics(scaled_profiles, original_cluster)["silhouette"],
+                    "algorithm": "kmeans", "clusters": cluster_parameters["n_clusters"],
+                    "parameters": cluster_parameters,
+                    "original_silhouette": baseline["silhouette"],
                     "reduced_silhouette": clustering_metrics(coordinates, reduced_cluster)["silhouette"],
-                    "adjusted_rand_index": round(float(adjusted_rand_score(original_cluster, reduced_cluster)), 6),
+                    "adjusted_rand_index": round(float(adjusted_rand_score(baseline["labels"], reduced_cluster)), 6),
                 },
-                "original_cluster_assignments": {
-                    str(user_id): int(label)
-                    for user_id, label in zip(profiles["user_ids"], original_cluster)
-                },
+                "original_cluster_assignments": baseline["assignments"],
                 "reduced_cluster_assignments": {
                     str(user_id): int(label)
                     for user_id, label in zip(profiles["user_ids"], reduced_cluster)
                 },
-                "resource_usage": {"runtime_seconds": round(elapsed, 6),
+                "resource_usage": {"runtime_seconds": round(finished - started, 6),
+                                   "original_clustering_seconds": baseline["fit_seconds"],
+                                   "reduced_clustering_seconds": round(finished - reduced_started, 6),
                                    "peak_memory_bytes": int(peak_bytes)},
                 "model_path": str(model_path.relative_to(run_dir)),
                 "plot_path": str(plot_path.relative_to(run_dir)),
@@ -384,25 +393,7 @@ class AnalysisTrainer:
 
     @staticmethod
     def markdown(registry):
-        lines = ["# MovieLens 迭代二分析报告", "", f"任务：{registry['task_id']}",
-                 f"分析版本：{registry['analysis_version']}",
-                 f"数据版本：{registry['input']['data_version']}",
-                 f"T1：{registry['input']['T1']}；T2：{registry['input']['T2']}", "",
-                 "## 时间切分", "", "| 阶段 | 记录 | 正类 | 负类 |", "| --- | ---: | ---: | ---: |"]
-        for name, values in registry["split"].items():
-            lines.append(f"| {name} | {values['records']} | {values['positive']} | {values['negative']} |")
-        lines += ["", "## 分类", "", "| 算法 | 验证 F1 | 测试 F1 | 测试 AUC |", "| --- | ---: | ---: | ---: |"]
-        for name, item in registry["classification"]["algorithms"].items():
-            lines.append(f"| {name} | {item['validation_metrics']['f1']} | {item['test_metrics']['f1']} | {item['test_metrics']['roc_auc']} |")
-        lines += ["", "## 聚类", "", "| 算法 | 群体数 | 噪声比例 | Silhouette |", "| --- | ---: | ---: | ---: |"]
-        for name, item in registry["clustering"]["algorithms"].items():
-            metrics = item["metrics"]
-            lines.append(f"| {name} | {metrics['clusters']} | {metrics['noise_ratio']} | {metrics['silhouette']} |")
-        lines += ["", "## 降维", "", "| 算法 | 原始维数 | 实际维数 | 信息保留 | ARI |", "| --- | ---: | ---: | ---: | ---: |"]
-        for name, item in registry["reduction"]["algorithms"].items():
-            lines.append(f"| {name} | {item['original_dimensions']} | {item['actual_dimensions']} | {item['information_retained']} | {item['cluster_comparison']['adjusted_rand_index']} |")
-        lines += ["", "## 局限", ""] + [f"- {item}" for item in registry["limitations"]]
-        return "\n".join(lines) + "\n"
+        return training_overview(registry) + "\n\n" + training_details(registry) + "\n"
 
 
 def main():

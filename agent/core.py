@@ -1,13 +1,12 @@
 """Agent Loop — 核心 ReAct 循环：Context Assembly → LLM → Guardrail → Execute → Feedback。"""
 
-import sys
 from collections.abc import Callable
 from agent.types import (
-    Message, SystemMessage, UserMessage, AssistantMessage, ToolMessage,
-    Action, LLMResponse, BaseTool,
+    Message, SystemMessage, UserMessage, ToolMessage,
+    Action,
 )
 from agent.registry import ToolRegistry
-from agent.guardrail import guardrail
+from agent.tool_execution import execute_tool, record_tool_reply
 from agent.memory import FileMemory
 from agent.tracer import Tracer
 from agent import ui
@@ -37,6 +36,66 @@ def build_system_prompt(workspace: str) -> str:
 - 如果 shell 命令被拦截，尝试用其他方法实现
 
 当前工作目录：{workspace}"""
+
+
+def build_chat_system_prompt(workspace: str) -> str:
+    """对话模式的系统提示。"""
+    return f"""你是一个 AI 助手，擅长编程和命令行操作。你可以与用户自由对话，也可以在需要时使用以下工具：
+- read_file: 读取文件内容
+- write_file: 写入文件内容（自动创建父目录）
+- shell: 执行 Shell 命令
+
+如果用户只是打招呼或闲聊，正常回应即可，不用调用工具。
+如果需要完成编程任务，先理解需求再使用合适的工具。
+
+当前工作目录：{workspace}"""
+
+
+def run_chat_turn(messages, llm, tools, handle_action, on_text, *, max_steps=None, after_step=None,
+                  stop_on_text=True, on_model_error=None):
+    """驱动一轮对话。工具执行与展示交给入口，所有工具调用得到对应回执。"""
+    step = 0
+    while max_steps is None or step < max_steps:
+        step += 1
+        try:
+            response = llm.chat(messages, tools)
+        except Exception as error:
+            if on_model_error is None:
+                raise
+            on_model_error(step, error)
+            continue
+        message = response.message
+        index = len(messages)
+        if message:
+            messages.append(message)
+        done = False
+        try:
+            if message and message.content:
+                on_text(message.content)
+            for action in response.actions:
+                handle_action(step, action)
+                if action.type == 'done':
+                    done = True
+                    break
+        finally:
+            if message and message.tool_calls:
+                tail = messages[index + 1:]
+                answered = {item.tool_call_id for item in tail if isinstance(item, ToolMessage)}
+                insert_at = index + 1
+                for item in tail:
+                    if not isinstance(item, ToolMessage):
+                        break
+                    insert_at += 1
+                for call in message.tool_calls:
+                    call_id = call['id'] if isinstance(call, dict) else call.id
+                    if call_id not in answered:
+                        messages.insert(insert_at, ToolMessage(content='操作中断，未完成。', tool_call_id=call_id))
+                        insert_at += 1
+        if response.actions and after_step:
+            after_step()
+        if done or (stop_on_text and not response.actions):
+            return True
+    return False
 
 
 def build_memory_block(memory: FileMemory | None) -> str:
@@ -86,6 +145,9 @@ def run_agent(
     max_steps: int = 30,
     approver: Callable[[Action], bool] | None = None,
     workspace: str = '.',
+    *,
+    tool_executor=execute_tool,
+    chat_loop=run_chat_turn,
 ) -> str:
     """运行 Agent Loop，返回完成消息。"""
 
@@ -94,161 +156,81 @@ def run_agent(
         UserMessage(content=build_goal_prompt(task_name, goal)),
     ]
 
-    done = False
     answer = ''
-    steps = 0
-    tools: list[BaseTool] = tool_registry.list()
+    pending_feedback = []
 
-    print()  # 空行分隔
+    def approve(action, _gate, _reason):
+        if approver and approver(action):
+            print(f"  {ui.paint('yellow', '⚡')} {ui.paint('dim', '已人工批准')}")
+            return True
+        return False
 
-    while not done and steps < max_steps:
-        steps += 1
+    def handle_action(step, action):
+        nonlocal answer
+        feedback = None
+        if action.type == 'done':
+            answer = action.answer or 'Task completed'
+            print(f"{ui.dot()} {ui.paint('bold', 'Done')}")
+            for line in answer.splitlines() or ['(无答案)']:
+                print(f"  {line}")
+            result = summary = answer
+        elif action.type == 'take_note':
+            key, value = action.note_key or '', action.note_value or ''
+            if key:
+                memory.write(key, value)
+            result = summary = f'已记录笔记: {key}={value[:50]}'
+            print(f"{ui.dot()} {ui.paint('bold', 'Note')}({key})")
+            print(ui.render_result_line(value or '(空)', True))
+        elif action.type == 'call_tool':
+            _print_tool_call(action)
+            outcome = tool_executor(tool_registry, action, approve=approve)
+            result = summary = outcome.content
+            if outcome.status == 'blocked':
+                result = f'⛔ 安全护栏: {outcome.content}'
+                summary = f'[DENIED] {outcome.content}'
+                feedback = result
+            elif outcome.status == 'declined':
+                result = f'操作被拒绝: {outcome.content}'
+                summary = f'[ESCALATED-DENIED] {outcome.content}'
+            elif outcome.status in ('invalid', 'error'):
+                prefix = '错误' if outcome.status == 'invalid' else '工具执行异常'
+                result = summary = f'{prefix}: {outcome.content}'
+            _print_result(action.tool or '', outcome.success, result)
+            if outcome.status == 'failed':
+                if action.tool == 'shell' and '返回码' in outcome.content:
+                    feedback = '命令执行失败（返回码非零），请参考前面的执行结果修正方法后重试。'
+                elif action.tool in ('read_file', 'write_file'):
+                    feedback = '文件操作失败，请检查路径是否正确后重试。'
+                if feedback:
+                    pending_feedback.append(feedback)
+        else:
+            result = summary = f'未知动作类型: {action.type}'
+            print(f"  {ui.paint('yellow', '⚠')} {result}")
+        record_tool_reply(messages, action, result)
+        tracer.record(step, action, result=summary, feedback=feedback)
 
-        # 1. 调用 LLM
-        try:
-            response: LLMResponse = llm.chat(messages, tools)
-        except Exception as e:
-            error_msg = f"LLM 调用失败: {e}"
-            print(f"  {ui.paint('yellow', '⚠')} {error_msg}")
-            messages.append(UserMessage(content=error_msg))
-            tracer.record(steps, Action(type='call_tool'), result=error_msg)
-            continue
+    def on_model_error(step, error):
+        message = f'LLM 调用失败: {error}'
+        print(f"  {ui.paint('yellow', '⚠')} {message}")
+        messages.append(UserMessage(content=message))
+        tracer.record(step, Action(type='call_tool'), result=message)
 
-        # 追加 assistant message
-        if response.message:
-            messages.append(response.message)
-            if response.message.content:
-                text = response.message.content.strip()
-                if text:
-                    print(text)
+    def flush_feedback():
+        messages.extend(UserMessage(content=note) for note in pending_feedback)
+        pending_feedback.clear()
 
-        # 2. 依次处理本轮全部动作（模型可能一次给出多个并行 tool call）
-        for action in response.actions:
-            if done:
-                break
+    print()
 
-            # 3. Guardrail 检查
-            guard = guardrail(action)
-            if guard.disposition == 'deny':
-                msg = f"⛔ 安全护栏: {guard.reason}"
-                print(ui.render_tool_line(action.tool or '', action.args or {}))
-                print(ui.render_result_line(msg, ok=False))
-                # 拦截也必须以 ToolMessage 响应 tool_call，否则会话违反协议、下一轮 API 400
-                if action.tool_call_id:
-                    messages.append(ToolMessage(content=msg, tool_call_id=action.tool_call_id))
-                else:
-                    messages.append(UserMessage(content=msg))
-                tracer.record(steps, action, result=f'[DENIED] {guard.reason}', feedback=msg)
-                continue
+    def on_text(text):
+        if text.strip():
+            print(text.strip())
 
-            if guard.disposition == 'escalate':
-                if approver:
-                    approved = approver(action)
-                else:
-                    approved = False
-
-                if not approved:
-                    msg = f"操作被拒绝: {guard.reason}"
-                    print(ui.render_tool_line(action.tool or '', action.args or {}))
-                    print(ui.render_result_line(msg, ok=False))
-                    if action.tool_call_id:
-                        messages.append(ToolMessage(content=msg, tool_call_id=action.tool_call_id))
-                    else:
-                        messages.append(UserMessage(content=msg))
-                    tracer.record(steps, action, result=f'[ESCALATED-DENIED] {guard.reason}')
-                    continue
-                print(f"  {ui.paint('yellow', '⚡')} {ui.paint('dim', '已人工批准')}")
-
-            # 4. 分发执行
-            if action.type == 'done':
-                answer = action.answer or 'Task completed'
-                done = True
-                print(f"{ui.dot()} {ui.paint('bold', 'Done')}")
-                for line in answer.splitlines() or ['(无答案)']:
-                    print(f"  {line}")
-                # done 也是一次 tool call，回灌 ToolMessage 保持协议完整
-                if action.tool_call_id:
-                    messages.append(ToolMessage(content=answer, tool_call_id=action.tool_call_id))
-                tracer.record(steps, action, result=answer)
-                break
-
-            elif action.type == 'take_note':
-                key = action.note_key or ''
-                value = action.note_value or ''
-                if key:
-                    memory.write(key, value)
-                result_text = f'已记录笔记: {key}={value[:50] if value else ""}'
-                print(f"{ui.dot()} {ui.paint('bold', 'Note')}({key})")
-                print(ui.render_result_line(value or '(空)', True))
-                if action.tool_call_id:
-                    messages.append(ToolMessage(content=result_text, tool_call_id=action.tool_call_id))
-                else:
-                    messages.append(UserMessage(content=result_text))
-                tracer.record(steps, action, result=result_text)
-                continue
-
-            elif action.type == 'call_tool':
-                tool_name = action.tool or ''
-                tool_args = action.args or {}
-
-                # 打印工具调用
-                _print_tool_call(action)
-
-                try:
-                    tool_result = tool_registry.execute(tool_name, tool_args)
-                except ValueError as e:
-                    result_text = f'错误: {e}'
-                    print(f"  {ui.paint('yellow', '⚠')} {result_text}")
-                    if action.tool_call_id:
-                        messages.append(ToolMessage(content=result_text, tool_call_id=action.tool_call_id))
-                    else:
-                        messages.append(UserMessage(content=result_text))
-                    tracer.record(steps, action, result=result_text)
-                    continue
-                except Exception as e:
-                    result_text = f'工具执行异常: {e}'
-                    print(f"  {ui.paint('yellow', '⚠')} {result_text}")
-                    if action.tool_call_id:
-                        messages.append(ToolMessage(content=result_text, tool_call_id=action.tool_call_id))
-                    else:
-                        messages.append(UserMessage(content=result_text))
-                    tracer.record(steps, action, result=result_text)
-                    continue
-
-                result_text = tool_result.data if tool_result.success else tool_result.error
-                _print_result(tool_name, tool_result.success, result_text)
-
-                # 5. Feedback Injection
-                if action.tool_call_id:
-                    messages.append(ToolMessage(content=result_text, tool_call_id=action.tool_call_id))
-                else:
-                    messages.append(UserMessage(content=result_text))
-
-                feedback = None
-                if not tool_result.success:
-                    if tool_name == 'shell' and '返回码' in (tool_result.error or ''):
-                        feedback = f"命令执行失败（返回码非零），这是出错信息，请参考前面的执行结果修正你的方法后重试。"
-                        messages.append(UserMessage(content=feedback))
-                    elif tool_name in ('read_file', 'write_file'):
-                        feedback = f"文件操作失败，请检查路径是否正确后重试。"
-                        messages.append(UserMessage(content=feedback))
-
-                tracer.record(steps, action, result=result_text, feedback=feedback)
-                continue
-
-            else:
-                msg = f'未知动作类型: {action.type}'
-                print(f"  {ui.paint('yellow', '⚠')} {msg}")
-                messages.append(UserMessage(content=msg))
-                tracer.record(steps, action, result=msg)
-
-    # 收尾
+    done = chat_loop(messages, llm, tool_registry.list(), handle_action, on_text, max_steps=max_steps,
+                     stop_on_text=False, on_model_error=on_model_error, after_step=flush_feedback)
     memory.consolidate()
     tracer.flush()
-
     if not done:
         answer = f"达到最大步数 ({max_steps})，任务未完成。"
         print()
         print(ui.render_result_line(answer, ok=False))
-
     return answer

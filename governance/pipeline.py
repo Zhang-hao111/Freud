@@ -12,7 +12,15 @@ from pathlib import Path
 from agent.types import BaseTool, ToolResult
 
 
-TABLES = ("users", "movies", "ratings")
+REFERENCE_TABLES = ("users", "movies")
+TABLES = (*REFERENCE_TABLES, "ratings")
+REFERENCE_COUNTS = {"users": 6040, "movies": 3883, "ratings": 1000209}
+ISSUE_LABELS = {
+    "field_count": "字段数错误", "missing": "必填项缺失", "format": "格式不规范",
+    "domain": "类型或值域错误", "timestamp": "时间范围错误", "reference": "关联实体不存在",
+    "duplicate": "完全重复", "conflict": "同一业务键内容冲突",
+}
+ACTION_LABELS = {"repair": "修复", "deduplicate": "去重", "quarantine": "隔离"}
 RULE_VERSION = "ml1m-governance-v1"
 SCORE_VERSION = "ml1m-five-dim-v1"
 WORKER = Path(__file__).with_name("worker.py")
@@ -77,15 +85,15 @@ class HadoopPipeline:
             raise RuntimeError(f"Hadoop 命令失败 ({result.returncode}): {' '.join(args[:4])}\n{detail}")
         return result
 
-    def stage(self, local_dir, hdfs_dir):
+    def stage(self, local_dir, hdfs_dir, tables=TABLES):
         self.command([self.hadoop, "fs", "-mkdir", "-p", hdfs_dir])
-        for table in TABLES:
+        for table in tables:
             self.command([self.hadoop, "fs", "-put", "-f", str(local_dir / f"{table}.dat"), hdfs_dir])
-        return [f"{hdfs_dir}/{table}.dat" for table in TABLES]
+        return [f"{hdfs_dir}/{table}.dat" for table in tables]
 
     def job(self, name, inputs, output, mapper, reducer, references, combiner=None):
         files = [f"{self.worker_hdfs}#worker.py",
-                 *(f"{references}/{table}.dat#{table}.dat" for table in ("users", "movies"))]
+                 *(f"{references}/{table}.dat#{table}.dat" for table in REFERENCE_TABLES)]
         command = [self.hadoop, "jar", self.streaming_jar, "-D", "mapreduce.job.name=" + name,
                    "-D", "mapreduce.job.reduces=" + ("0" if reducer is None else "1"),
                    "-files", ",".join(files)]
@@ -106,14 +114,13 @@ class HadoopPipeline:
     def split_clean(self, source, destination, metadata_only=False):
         destination.mkdir(parents=True, exist_ok=True)
         counts = Counter()
-        handles = {table: open(destination / f"{table}.dat", "w", encoding="iso-8859-1", newline="\n") for table in TABLES}
+        tables = REFERENCE_TABLES if metadata_only else TABLES
+        handles = {table: open(destination / f"{table}.dat", "w", encoding="iso-8859-1", newline="\n") for table in tables}
         quarantine = None if metadata_only else open(destination / "quarantine.jsonl", "w", encoding="utf-8")
         try:
             with open(source, encoding="utf-8") as records:
                 for line in records:
                     record = json.loads(line)
-                    if metadata_only and record["table"] == "ratings":
-                        continue
                     action = record["action"]
                     counts[action] += 1
                     if action in {"keep", "repair"}:
@@ -169,11 +176,11 @@ class HadoopPipeline:
             before = self.score("score-before", hdfs_run + "/audit-before", hdfs_run + "/score-before", run_dir, hdfs_run + "/raw")
             notify("Hadoop 清洗并核对跨表关联")
             self.job("clean-initial", [hdfs_run + "/audit-before"], hdfs_run + "/clean-initial",
-                     "clean-map", None, hdfs_run + "/raw")
+                     "clean-metadata-map", None, hdfs_run + "/raw")
             self.fetch(hdfs_run + "/clean-initial", run_dir / "clean-initial.jsonl")
             references = run_dir / "references"
             self.split_clean(run_dir / "clean-initial.jsonl", references, metadata_only=True)
-            self.stage(references, hdfs_run + "/references")
+            self.stage(references, hdfs_run + "/references", REFERENCE_TABLES)
             self.job("clean-final", [hdfs_run + "/audit-before"], hdfs_run + "/clean-final",
                      "clean-map", None, hdfs_run + "/references")
             self.fetch(hdfs_run + "/clean-final", run_dir / "clean-final.jsonl")
@@ -232,7 +239,7 @@ class HadoopPipeline:
                                  "Up-to-date": "评分时间在 2002-02-28 至 2003-02-28 的比例，仅评分表参与",
                                  "Consistent": "字段格式、类别、外键与同键内容无冲突的记录率"}}
             (run_dir / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-            (run_dir / "report.md").write_text(self.markdown(report), encoding="utf-8")
+            (run_dir / "report.md").write_text(self.markdown(report, clean_dir), encoding="utf-8")
             notify("已完成")
             return report
         except Exception as error:
@@ -241,24 +248,66 @@ class HadoopPipeline:
             raise
 
     @staticmethod
-    def markdown(report):
-        lines = ["# MovieLens 1M 数据治理评估报告", "", f"任务：{report['task_id']}",
-                 f"原始版本：{report['source_version']}；清洗版本：{report['data_version']}",
-                 f"规则：{report['rule_version']}；评分：{report['score_version']}",
-                 f"T1：{report['T1']}；T2：{report['T2']}", "",
-                 "| 维度 | 清洗前 | 清洗后 | 变化 |", "| --- | ---: | ---: | ---: |"]
+    def markdown(report, clean_dir=None):
+        before, after, actions = report["before"], report["after"], report["actions"]
+        lines = ["### 迭代一已完成", "",
+                 f"三张表合计 **{before['total']:,} → {after['total']:,} 条**。"
+                 f"修复 {actions.get('repair', 0):,} 条、去重 {actions.get('deduplicate', 0):,} 条、"
+                 f"隔离 {actions.get('quarantine', 0):,} 条。", "",
+                 "| 维度 | 清洗前 | 清洗后 | 变化（分） | 评分依据 |",
+                 "| --- | ---: | ---: | ---: | --- |"]
         for name in report["method"]:
-            before, after = report["before"]["scores"][name], report["after"]["scores"][name]
-            lines.append(f"| {name} | {before} | {after} | {round(after-before, 4) if before is not None and after is not None else 'N/A'} |")
-        lines += ["", "## 处置", "", f"原始记录：{report['before']['total']}；清洗后：{report['after']['total']}",
-                  f"修复：{report['actions'].get('repair', 0)}；去重：{report['actions'].get('deduplicate', 0)}；隔离：{report['actions'].get('quarantine', 0)}",
-                  "", "## Agent 解释", "", report["explanation"], "", "## 评分依据", ""]
-        lines += [f"- {name}：{method}" for name, method in report["method"].items()]
-        lines += ["", "## 局限", ""] + [f"- {item}" for item in report["limitations"]]
-        lines += ["", "## 清洗前异常计数", ""] + [f"- {name}：{count}" for name, count in sorted(report["before"]["issues"].items())]
-        lines += ["", "## 代表性处置记录", ""]
-        lines += [f"- {item['table']}：{item['raw']} → {item['action']}（{', '.join(item['issues'])}）"
-                  for item in report["disposition_examples"]]
+            old, new = before["scores"][name], after["scores"][name]
+            delta = f"{new - old:+.4f}" if old is not None and new is not None else "不可评估"
+            lines.append(f"| {name} | {old if old is not None else '不可评估'} | "
+                         f"{new if new is not None else '不可评估'} | {delta} | {report['method'][name]} |")
+        if "tables" in before and "tables" in after:
+            lines += ["", "#### 数据量与来源核对", "",
+                      "| 文件 | 本次原始记录 | 清洗后 | 作业文档基准 |",
+                      "| --- | ---: | ---: | ---: |"]
+            for table in TABLES:
+                lines.append(f"| {table}.dat | {before['tables'].get(table, 0):,} | "
+                             f"{after['tables'].get(table, 0):,} | {REFERENCE_COUNTS[table]:,} |")
+            if before["tables"] != REFERENCE_COUNTS:
+                lines += ["", "**本次输入记录数与作业文档的标准 MovieLens 1M 不一致。** "
+                              "若使用课程发放的含异常数据包，请按下方原始数据版本复现实验；基准列用于区分数据版本。"]
+            else:
+                lines += ["", "本次输入记录数与作业文档一致，来源仍应以发布文件的校验值为准。"]
+
+        remaining = "、".join(f"{ISSUE_LABELS.get(issue, issue)} {count:,} 条"
+                             for issue, count in sorted(after["issues"].items()))
+        lines += ["", "#### 改善与局限", "",
+                  f"清洗后仍检出 {remaining}。" if remaining else "清洗后按当前规则未检出异常。",
+                  "", *[f"- {item}" for item in report["limitations"]],
+                  "", "#### 异常处置样例", ""]
+        if before["issues"]:
+            issues = "、".join(f"{ISSUE_LABELS.get(issue, issue)} {count:,}"
+                              for issue, count in sorted(before["issues"].items()))
+            lines += [f"清洗前的异常标记包括 {issues}。同一记录可能包含多个标记。", ""]
+        examples = report["disposition_examples"]
+        for item in examples:
+            label = ACTION_LABELS[item["action"]]
+            reason = "、".join(ISSUE_LABELS.get(issue, issue) for issue in item["issues"])
+            value = f" → `{item['value']}`" if item["action"] == "repair" else ""
+            lines.append(f"- {item['table']}.dat `{item['raw']}`{value} → **{label}**（{reason}）")
+        if not examples:
+            lines.append("本次无已登记的处置样例。")
+
+        if clean_dir is not None:
+            lines += ["", "#### 清洗后数据样例", ""]
+            for table in TABLES:
+                path = clean_dir / f"{table}.dat"
+                value = ""
+                if path.is_file():
+                    with path.open(encoding="iso-8859-1") as source:
+                        value = source.readline().rstrip("\r\n")
+                lines.append(f"- {table}.dat 首条记录 " + (f"`{value}`" if value else "不可用"))
+
+        lines += ["", "#### 版本与时间边界", "",
+                  f"- 任务 ID `{report['task_id']}`",
+                  f"- 原始数据 `{report['source_version']}`，清洗数据 `{report['data_version']}`",
+                  f"- 清洗规则 `{report['rule_version']}`，评分方案 `{report['score_version']}`",
+                  f"- T1 `{report['T1']}`，T2 `{report['T2']}`。训练期 ≤ T1，验证期 (T1, T2]，测试期 > T2。"]
         return "\n".join(lines) + "\n"
 
 

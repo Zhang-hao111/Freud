@@ -12,11 +12,12 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agent.types import Action, AssistantMessage, ToolMessage
-from agent.core import run_agent
+from agent.types import Action, AssistantMessage, LLMResponse, ToolMessage, UserMessage
+from agent.core import run_agent, run_chat_turn
 from agent.llm import MockLLM
 from agent.registry import create_default_registry
 from agent.memory import FileMemory
@@ -106,6 +107,54 @@ class ProtocolRegressionTest(unittest.TestCase):
         answer, violations = self._run(responses)
         self.assertEqual(violations, [])
         self.assertEqual(answer, 'ok')
+
+    def test_interactive_done_settles_remaining_call_without_executing_it(self):
+        done = Action(type='done', answer='完成', tool_call_id='done')
+        late = Action(type='call_tool', tool='shell', tool_call_id='late')
+        staged = LLMResponse(actions=[done, late], message=AssistantMessage(
+            tool_calls=[{'id': 'done'}, {'id': 'late'}]))
+        llm = Mock()
+        llm.chat.return_value = staged
+        messages = []
+        executed = []
+
+        def handle_action(step, action):
+            executed.append(action)
+            messages.append(ToolMessage(content=action.answer, tool_call_id=action.tool_call_id))
+
+        self.assertTrue(run_chat_turn(messages, llm, [], handle_action, lambda _: None))
+        self.assertEqual(executed, [done])
+        self.assertEqual([item.tool_call_id for item in messages[1:]], ['done', 'late'])
+        self.assertIn('未完成', messages[-1].content)
+
+    def test_batch_failure_feedback_follows_all_parallel_tool_replies(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            actions = [
+                Action(type='call_tool', tool='read_file',
+                       args={'path': f'{tmp}/missing'}, tool_call_id='missing'),
+                Action(type='call_tool', tool='shell', args={'command': 'echo ok'}, tool_call_id='ok'),
+            ]
+            seen = []
+            replies = iter([
+                LLMResponse(actions=actions, message=AssistantMessage(
+                    tool_calls=[{'id': 'missing'}, {'id': 'ok'}])),
+                LLMResponse(actions=[Action(type='done', answer='完成')]),
+            ])
+            llm = Mock()
+
+            def respond(messages, _tools):
+                seen.append(messages.copy())
+                return next(replies)
+
+            llm.chat.side_effect = respond
+            self.assertEqual(run_agent(
+                '测试任务', '回归测试', llm, create_default_registry(),
+                FileMemory(f'{tmp}/memory.json'), Tracer(f'{tmp}/traces'), workspace=tmp,
+            ), '完成')
+        first, second, feedback = seen[-1][-3:]
+        self.assertEqual((first.tool_call_id, second.tool_call_id), ('missing', 'ok'))
+        self.assertIsInstance(feedback, UserMessage)
+        self.assertIn('文件操作失败', feedback.content)
 
 
 if __name__ == '__main__':

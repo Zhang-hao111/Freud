@@ -33,12 +33,15 @@ class ReadFileTool(BaseTool):
         },
         'required': ['path'],
     }
+ 
+    def __init__(self, workspace: str | None = None):
+        self.workspace = workspace
 
     def execute(self, args: dict) -> ToolResult:
         raw = args.get('path', '')
         if not isinstance(raw, str) or not raw.strip():
             return ToolResult(success=False, error='缺少 path 参数')
-        file_path = os.path.abspath(raw)
+        file_path = os.path.abspath(os.path.join(self.workspace or '', raw))
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
@@ -61,6 +64,9 @@ class WriteFileTool(BaseTool):
         'required': ['path', 'content'],
     }
 
+    def __init__(self, workspace: str | None = None):
+        self.workspace = workspace
+
     def execute(self, args: dict) -> ToolResult:
         raw = args.get('path', '')
         if not isinstance(raw, str) or not raw.strip():
@@ -68,7 +74,7 @@ class WriteFileTool(BaseTool):
         content = args.get('content', '')
         if not isinstance(content, str):
             content = str(content)
-        file_path = os.path.abspath(raw)
+        file_path = os.path.abspath(os.path.join(self.workspace or '', raw))
         try:
             os.makedirs(os.path.dirname(file_path), exist_ok=True)
             with open(file_path, 'w', encoding='utf-8') as f:
@@ -89,8 +95,9 @@ class ShellTool(BaseTool):
         'required': ['command'],
     }
 
-    def __init__(self, timeout: int = 30):
+    def __init__(self, timeout: int = 30, workspace: str | None = None):
         self.timeout = timeout
+        self.workspace = workspace
 
     def execute(self, args: dict) -> ToolResult:
         raw = args.get('command', '')
@@ -103,6 +110,7 @@ class ShellTool(BaseTool):
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
+                cwd=self.workspace,
             )
             output = ''
             if result.stdout:
@@ -152,10 +160,10 @@ class ToolRegistry:
         return tool.execute(args)
 
 
-def create_default_registry(shell_timeout: int = 30) -> ToolRegistry:
+def create_default_registry(shell_timeout: int = 30, *, workspace: str | None = None) -> ToolRegistry:
     """创建包含默认三件套的工具注册表。"""
     registry = ToolRegistry()
-    registry.register(ReadFileTool())
-    registry.register(WriteFileTool())
-    registry.register(ShellTool(timeout=shell_timeout))
+    registry.register(ReadFileTool(workspace))
+    registry.register(WriteFileTool(workspace))
+    registry.register(ShellTool(timeout=shell_timeout, workspace=workspace))
     return registry
