@@ -41,11 +41,11 @@ MovieLens 1M
 
 ## 环境准备
 
-- Python 3.11 或更新版本，以及 [uv](https://docs.astral.sh/uv/)
-- Node.js 22.12 或更新版本，以及 pnpm
-- Hadoop 3、Hadoop Streaming jar 和工作节点上的 Python 3
-- MovieLens 1M 的三个原始文件
-- 可选：兼容 OpenAI Chat Completions API 的模型服务，用于普通对话、结果解读和追问
+- Linux、Python 3.11 或更新版本，以及 [uv](https://docs.astral.sh/uv/)
+- 从源码构建网页需要 Node.js 22.12 或更新版本及 pnpm
+- 普通 Agent 的 Shell 工具需要 Bubblewrap（`bwrap`）及可用的 Linux 用户命名空间
+- MovieLens 课程任务需要 Hadoop 3、Hadoop Streaming jar、工作节点上的 Python 3，以及三个原始数据文件
+- 普通对话需要兼容 OpenAI Chat Completions API 的模型服务。课程任务可以独立运行，配置模型后还可解读结果和继续追问
 
 将原始数据放在项目根目录的 `ml-1m/ml-1m/`。如果数据和运行产物放在其他位置，用 `MOVIELENS_ROOT` 指定包含 `ml-1m/` 的绝对路径。
 
@@ -59,6 +59,8 @@ ml-1m/ml-1m/
 保留原始文件格式和编码。数据、API Key、模型和运行结果不随仓库分发。
 
 ## 安装与启动
+
+### 从源码启动课程网页
 
 在项目根目录安装 Agent 和 MovieLens 插件，再构建网页。
 
@@ -94,7 +96,26 @@ export HADOOP_STREAMING_JAR=/path/to/hadoop-streaming-3.x.x.jar
 uv run --extra movielens freud-web
 ```
 
-访问 `http://127.0.0.1:8875/`，输入框下方的「数据任务」菜单应显示清洗、训练和查询三个入口。只使用通用 Agent 时，运行 `uv sync` 安装核心包，再用 `uv run freud-web` 启动同一个网页。切换安装方式后重启服务即可重新发现插件。修改前端后重新运行 `pnpm build` 并刷新页面，修改 Python 后端后重启 `freud-web`。
+访问 `http://127.0.0.1:8875/`，输入框下方的「数据任务」菜单应显示清洗、训练和查询三个入口。只使用通用 Agent 时，运行 `uv sync` 安装核心包，再用 `uv run freud-web` 启动已构建的网页。修改前端后运行 `pnpm build` 并刷新页面。切换插件或修改 Python 后端后，重启 `freud-web`。
+
+### 构建和安装 wheel
+
+先按上面的步骤构建网页，再从仓库根目录打包 Agent 和课程插件。
+
+```bash
+uv build --wheel --out-dir dist
+uv build --wheel --out-dir dist plugins/movielens
+```
+
+把生成的 wheel 复制到使用目录，在该目录安装并启动。
+
+```bash
+uv venv
+uv pip install ./coding_agent-*.whl ./freud_movielens-*.whl
+.venv/bin/freud-web
+```
+
+Agent wheel 已包含静态网页资源，安装后可以在任意工作目录开启网页。只使用通用 Agent 时，可只安装 `coding_agent` wheel。运行课程任务前，仍需准备 MovieLens 数据并配置 Hadoop。
 
 ## 网页交互
 
@@ -112,7 +133,9 @@ uv run --extra movielens freud-web
 
 训练也可指定其他已完成的迭代一任务 ID。页面提供高级参数输入，参数和命令行训练方式见 [迭代二说明](docs/iteration2/README.md)。
 
-网页还支持添加项目工作区、新建与删除对话，以及切换工具审批模式。已有会话保留创建时绑定的工作目录。普通 Agent 对话中的相对文件路径和 Shell 命令以该目录为工作目录。
+网页支持添加项目工作区、新建与删除对话，以及切换工具审批模式。文件工具限定在会话所在工作区，Shell 使用 Bubblewrap 隔离，能写入工作区和沙箱临时目录并读取基础系统工具。Shell 不继承启动进程的环境凭据，也无法访问外部网络。询问确认模式会对写文件和 Shell 分别请求确认。自动批准模式仍使用相同的工作区隔离。
+
+任务运行时可点击发送区的停止按钮。Shell 可终止正在运行的子进程，模型请求结束后停止后续步骤，Hadoop 和机器学习任务在下一个阶段边界停止。关闭网页后，数据任务可继续执行，重新打开该会话可以查看状态或请求停止。
 
 ## 结果与数据目录
 
@@ -127,6 +150,8 @@ analysis-runs/latest.json    最近一次成功的迭代二训练登记
 ~/.agent-harness/traces/     Agent 执行轨迹
 ```
 
+普通聊天按字符预算选取近期消息和当前会话的笔记。当前任务的输入完整保留，超出预算时会提示拆分任务。MovieLens 追问使用当前任务证据，新产生的报告保留在会话记录中，并与普通模型上下文分开。查询原始 JSON 可通过结果中的链接下载。删除会话同时清理该会话的查询附件和关联 trace。共享的清洗和训练产物仍可供其他会话使用。旧版未关联会话的 trace 需要单独清理。
+
 网页中迭代二查询优先使用当前对话的训练结果，也可读取 `analysis-runs/latest.json` 指向的结果。使用当前清洗上下文时会核对对应版本与时间边界。Hadoop 默认文件系统为本地文件系统时，网页使用本机临时目录存放中间文件；使用 HDFS 时默认根目录为 `/freud/governance`，可通过 `GOVERNANCE_HDFS_ROOT` 调整。
 
 ## 架构与项目结构
@@ -137,6 +162,8 @@ analysis-runs/latest.json    最近一次成功的迭代二训练登记
    ▼
 agent/web.py              网页接口与审批交互
 agent/conversations.py    会话回合、工作区和追问路由
+agent/context.py          模型请求的上下文组装
+agent/execution_scope.py  工作区文件访问与 Shell 隔离
 agent/workflows.py        任务、表单、追问与报告注册
 agent/plugins.py          发现并装配已安装插件
    │

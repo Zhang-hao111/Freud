@@ -1,8 +1,9 @@
 """Agent Loop — 核心 ReAct 循环：Context Assembly → LLM → Guardrail → Execute → Feedback。"""
 
 from collections.abc import Callable
+from agent.context import model_context
 from agent.types import (
-    Message, SystemMessage, UserMessage, ToolMessage,
+    AssistantMessage, SystemMessage, UserMessage, ToolMessage,
     Action,
 )
 from agent.registry import ToolRegistry
@@ -33,7 +34,7 @@ def build_system_prompt(workspace: str) -> str:
 重要约束：
 - 使用通用的算法实现，不得针对特定输入硬编码返回值
 - 每个任务独立完成，不要在前一个任务的代码基础上修改
-- 如果 shell 命令被拦截，尝试用其他方法实现
+- 遵循工具审批和工作区限制。遇到拒绝时说明原因，不绕过限制。
 
 当前工作目录：{workspace}"""
 
@@ -52,27 +53,36 @@ def build_chat_system_prompt(workspace: str) -> str:
 
 
 def run_chat_turn(messages, llm, tools, handle_action, on_text, *, max_steps=None, after_step=None,
-                  stop_on_text=True, on_model_error=None):
+                  stop_on_text=True, on_model_error=None, memory=None, checkpoint=None):
     """驱动一轮对话。工具执行与展示交给入口，所有工具调用得到对应回执。"""
     step = 0
     while max_steps is None or step < max_steps:
+        if checkpoint:
+            checkpoint()
         step += 1
         try:
-            response = llm.chat(messages, tools)
+            response = llm.chat(model_context(messages, memory), tools)
         except Exception as error:
             if on_model_error is None:
                 raise
             on_model_error(step, error)
-            continue
+            return False
         message = response.message
         index = len(messages)
         if message:
             messages.append(message)
         done = False
         try:
+            if checkpoint:
+                checkpoint()
             if message and message.content:
                 on_text(message.content)
             for action in response.actions:
+                if checkpoint:
+                    checkpoint()
+                if action.type == 'invalid':
+                    record_tool_reply(messages, action, action.error or '无效的工具调用')
+                    continue
                 handle_action(step, action)
                 if action.type == 'done':
                     done = True
@@ -148,13 +158,15 @@ def run_agent(
     *,
     tool_executor=execute_tool,
     chat_loop=run_chat_turn,
+    messages=None,
 ) -> str:
     """运行 Agent Loop，返回完成消息。"""
 
-    messages: list[Message] = [
-        SystemMessage(content=build_system_prompt(workspace) + build_memory_block(memory)),
+    messages = [] if messages is None else messages
+    messages.extend([
+        SystemMessage(content=build_system_prompt(workspace)),
         UserMessage(content=build_goal_prompt(task_name, goal)),
-    ]
+    ])
 
     answer = ''
     pending_feedback = []
@@ -210,13 +222,13 @@ def run_agent(
         tracer.record(step, action, result=summary, feedback=feedback)
 
     def on_model_error(step, error):
-        message = f'LLM 调用失败: {error}'
-        print(f"  {ui.paint('yellow', '⚠')} {message}")
-        messages.append(UserMessage(content=message))
-        tracer.record(step, Action(type='call_tool'), result=message)
+        nonlocal answer
+        answer = f'LLM 调用失败: {error}'
+        messages.append(AssistantMessage(content=answer))
+        tracer.record(step, Action(type='call_tool'), result=answer)
 
     def flush_feedback():
-        messages.extend(UserMessage(content=note) for note in pending_feedback)
+        messages.extend(UserMessage(content=note, internal=True) for note in pending_feedback)
         pending_feedback.clear()
 
     print()
@@ -226,11 +238,11 @@ def run_agent(
             print(text.strip())
 
     done = chat_loop(messages, llm, tool_registry.list(), handle_action, on_text, max_steps=max_steps,
-                     stop_on_text=False, on_model_error=on_model_error, after_step=flush_feedback)
+                     stop_on_text=False, on_model_error=on_model_error, after_step=flush_feedback, memory=memory)
     memory.consolidate()
     tracer.flush()
     if not done:
-        answer = f"达到最大步数 ({max_steps})，任务未完成。"
+        answer = answer or f"达到最大步数 ({max_steps})，任务未完成。"
         print()
         print(ui.render_result_line(answer, ok=False))
     return answer

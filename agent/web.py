@@ -6,6 +6,7 @@ import mimetypes
 import os
 import re
 import threading
+import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -18,7 +19,7 @@ from agent.runtime import default_runtime, install_workflows
 from agent.session import dump_messages
 from agent.workspaces import install_workspaces
 
-DIST = Path(__file__).resolve().parent.parent / 'web' / 'dist'
+DIST = Path(__file__).resolve().with_name('web_dist')
 
 
 class WebAgent:
@@ -43,7 +44,7 @@ class WebAgent:
             pending['event'].set()
             return True
 
-    def _confirm_tool(self, action, _gate, reason, emit):
+    def _confirm_tool(self, action, _gate, reason, emit, session_id):
         request_id = uuid.uuid4().hex
         pending = {'event': threading.Event(), 'approved': False}
         with self.lock:
@@ -51,7 +52,10 @@ class WebAgent:
         try:
             emit({'type': 'approval', 'id': request_id, 'tool': action.tool,
                   'args': action.args or {}, 'reason': reason})
-            pending['event'].wait(300)
+            deadline = time.monotonic() + 300
+            while time.monotonic() < deadline and not pending['event'].wait(.1):
+                self.conversations.checkpoint(session_id)
+            self.conversations.checkpoint(session_id)
             return pending['approved']
         finally:
             with self.lock:
@@ -60,7 +64,7 @@ class WebAgent:
     def chat(self, session, text, emit, **options):
         return self.conversations.chat(
             session, text, emit, **options,
-            approve=lambda action, gate, reason: self._confirm_tool(action, gate, reason, emit),
+            approve=lambda action, gate, reason: self._confirm_tool(action, gate, reason, emit, session.data['id']),
         )
 
 
@@ -99,8 +103,9 @@ def make_handler(app):
                 data, content_type = found
                 self.send_response(200)
                 self.send_header('Content-Type', content_type)
-                if content_type.startswith('text/markdown'):
-                    self.send_header('Content-Disposition', f'attachment; filename="{artifact.group(2)}-{artifact.group(3)}.md"')
+                extension = {'text/markdown': 'md', 'application/json': 'json'}.get(content_type.split(';', 1)[0])
+                if extension:
+                    self.send_header('Content-Disposition', f'attachment; filename="{artifact.group(2)}-{artifact.group(3)}.{extension}"')
                 self.send_header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; sandbox")
                 self.send_header('Content-Length', str(len(data)))
                 self.end_headers()
@@ -108,12 +113,16 @@ def make_handler(app):
                 return
             if path == '/api/sessions':
                 return self.reply(200, conversations.list_sessions())
+            status = re.fullmatch(r'/api/sessions/([^/]+)/status', path)
+            if status:
+                return self.reply(200, {'run_status': conversations.run_status(status.group(1))})
             if path.startswith('/api/sessions/'):
                 session = conversations.session(path.removeprefix('/api/sessions/'))
                 if not session:
                     return self.reply(404, {'error': '会话不存在'})
                 return self.reply(200, {**conversations.session_info(session),
                                         'messages': dump_messages(session.messages),
+                                        'run_status': conversations.run_status(session.data['id']),
                                         'followup_context': conversations.workflows.context(session)})
             target = (DIST / path.lstrip('/')).resolve() if path != '/' else DIST / 'index.html'
             if not target.is_relative_to(DIST.resolve()) or not target.is_file():
@@ -156,6 +165,11 @@ def make_handler(app):
                     return self.reply(201, conversations.session_info(session))
                 except ValueError as exc:
                     return self.reply(400, {'error': str(exc)})
+            match = re.fullmatch(r'/api/sessions/([^/]+)/cancel', self.path)
+            if match:
+                if conversations.cancel(match.group(1)):
+                    return self.reply(202, {'run_status': 'cancelling'})
+                return self.reply(409, {'error': '当前没有运行中的任务'})
             match = re.fullmatch(r'/api/sessions/([^/]+)/end-context', self.path)
             if match:
                 try:
@@ -199,7 +213,7 @@ def main():
     parser.add_argument('--mock', action='store_true')
     args = parser.parse_args()
     if not (DIST / 'index.html').exists():
-        parser.error('前端尚未构建：请在 web 目录执行 pnpm install && pnpm build')
+        parser.error('缺少网页资源：请安装完整 wheel，或在源码的 web 目录执行 pnpm install && pnpm build')
     config = load_config()
     config['launch_dir'] = str(Path.cwd())
     config['workspace'] = str(Path(config['workspace']).expanduser().resolve())

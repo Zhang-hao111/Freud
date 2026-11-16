@@ -1,6 +1,6 @@
 """权限模式 — Shift+Tab 循环切换的三档执行策略（参考 Claude Code）。
 
-- ask:    默认。文件改动（write_file）每次询问；shell 按护栏三态规则。
+- ask:    默认。write_file 和 Shell 每次询问。
 - accept: 允许编辑。write_file 直接执行；shell 仍按护栏规则。
 - yolo:   允许所有。文件改动与 escalate 级命令全部自动批准（deny 仍拒绝）。
 """
@@ -30,7 +30,7 @@ def needs_confirm(mode: str, tool: str) -> bool:
     if mode == 'accept':
         return False
     if mode == 'ask':
-        return tool == 'write_file'
+        return tool in ('write_file', 'shell')
     return False  # yolo
 
 

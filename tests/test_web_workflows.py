@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from threading import Event
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch, Mock
@@ -65,8 +66,12 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn('| UserID | 降维坐标 | 原始群体 | 降维后群体 |', events[-1]['content'])
         self.assertIn('图中每点对应参与实验的一份训练期画像', events[-1]['content'])
         self.session = self.store.list()[0]
-        self.assertTrue(self.flows.artifact(self.session, 'plot', self.session.data['workflows']['analysis_job']['task_id'], 'pca'))
-        query_id = self.session.data['workflows']['analysis_job']['task_id']
+        query_id = self.session.data['workflows']['analysis_job_id']
+        self.assertTrue(self.flows.artifact(self.session, 'plot', query_id, 'pca'))
+        self.assertNotIn('analysis_job', self.session.data['workflows'])
+        raw, mime = self.flows.artifact(self.session, 'analysis-json', query_id)
+        self.assertTrue(mime.startswith('application/json'))
+        self.assertEqual({row['algorithm'] for row in json.loads(raw)}, {'pca', 'truncated_svd'})
         content, mime = self.flows.artifact(self.session, 'analysis-report', query_id)
         self.assertTrue(mime.startswith('text/markdown'))
         self.assertIn('降维与聚类对照', content.decode())
@@ -253,11 +258,11 @@ class WorkflowTests(unittest.TestCase):
 
     def test_delete_running_session_is_blocked(self):
         session_id = self.session.data['id']
-        self.app.conversations.active.add(session_id)
+        self.app.conversations.active[session_id] = Event()
         with self.assertRaises(ValueError):
             self.app.conversations.delete_session(session_id)
         self.assertTrue(self.session.path.exists())
-        self.app.conversations.active.remove(session_id)
+        self.app.conversations.active.pop(session_id)
         self.assertTrue(self.app.conversations.delete_session(session_id))
         self.assertFalse(self.session.path.exists())
         self.assertFalse(self.app.conversations.delete_session(session_id))

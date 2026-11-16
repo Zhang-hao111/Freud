@@ -3,6 +3,10 @@
 from typing import Callable, Literal, NotRequired, TypedDict
 
 
+class RunCancelled(Exception):
+    """用户请求停止当前回合。"""
+
+
 class TextEvent(TypedDict):
     type: Literal['progress', 'result', 'error', 'assistant_update']
     content: str

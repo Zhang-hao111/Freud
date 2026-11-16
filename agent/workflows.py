@@ -1,11 +1,14 @@
 """工作流注册、会话状态和回复事件，供交互入口调用。"""
 
 from collections.abc import Callable
+from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from typing import Literal
 
 from agent.core import build_chat_system_prompt
-from agent.events import Emit
+from agent.events import Emit, RunCancelled
+from agent.session import SessionConflict
 from agent.types import AssistantMessage, SystemMessage, UserMessage
 
 
@@ -44,6 +47,19 @@ class Workflows:
         self.plugins = {}
         self._artifacts = {}
         self._commands = {}
+
+    @contextmanager
+    def registration(self):
+        """初始化插件失败时撤销该次工作流注册。"""
+        registries = (self.plugins, self._artifacts, self._commands)
+        snapshots = [registry.copy() for registry in registries]
+        try:
+            yield
+        except Exception:
+            for registry, snapshot in zip(registries, snapshots):
+                registry.clear()
+                registry.update(snapshot)
+            raise
 
     def register(self, name, task: WorkflowTask):
         if name in self.plugins:
@@ -97,10 +113,11 @@ class Workflows:
         reader = self._artifacts.get(name)
         return reader(session, task_id, algorithm) if reader else None
 
-    def run(self, session, text, request, emit: Emit):
+    def run(self, session, text, request, emit: Emit, *, checkpoint=None):
         messages = session.messages
-        state = session.data.setdefault('workflows', {})
+        state = deepcopy(session.data.get('workflows', {}))
         connected = True
+
         def send(event):
             nonlocal connected
             if connected:
@@ -108,11 +125,17 @@ class Workflows:
                     emit(event)
                 except (BrokenPipeError, ConnectionResetError):
                     connected = False
+
+        def progress(event):
+            if checkpoint and event['type'] == 'progress' and event['content'] != '已完成':
+                checkpoint()
+            send(event)
+
         try:
             if not messages:
                 messages.append(SystemMessage(content=build_chat_system_prompt(session.data['workspace'])))
             session.note_title(text)
-            messages.append(UserMessage(content=text))
+            messages.append(UserMessage(content=text, workflow=True))
             session.save(messages)
             mode = request.get('mode')
             followup = mode == 'followup'
@@ -122,7 +145,9 @@ class Workflows:
             handler = (plugin.followup if followup else plugin.run) if plugin else None
             if handler is None:
                 raise ValueError('未知任务类型')
-            reply = handler(session, state, text, request, send)
+            if checkpoint:
+                checkpoint()
+            reply = handler(session, state, text, request, progress)
             if not followup or target != request.get('target'):
                 state['followup_context'] = ({'target': target, 'message_index': len(messages) - 1}
                                              if plugin.followup else None)
@@ -134,26 +159,47 @@ class Workflows:
                 recent = [m.content[:500] for m in messages[start:-1] if isinstance(m, UserMessage)][-4:]
                 send({'type': 'progress', 'content': '正在根据登记结果回答'})
                 try:
+                    if checkpoint:
+                        checkpoint()
                     reply.content = plugin.result_llm.answer(text, reply.evidence, recent_questions=recent)
+                    if checkpoint:
+                        checkpoint()
                     reply.content = '**LLM 解读**\n\n' + reply.content
+                except RunCancelled:
+                    raise
                 except Exception:
                     reply.content = '模型暂不可用，以下为登记结果。\n\n' + reply.content
-            message = AssistantMessage(content=reply.content)
+            message = AssistantMessage(content=reply.content, workflow=True)
+            session.data['workflows'] = state
             messages.append(message)
             session.save(messages)
             send({'type': 'assistant', 'content': reply.content, 'workflow_result': True})
             if not followup and use_model:
                 try:
+                    if checkpoint:
+                        checkpoint()
                     explanation = plugin.result_llm.answer(text, reply.evidence, summary=True)
+                    if checkpoint:
+                        checkpoint()
                     interpretation = '**LLM 解读**\n\n' + explanation
+                except RunCancelled:
+                    send({'type': 'progress', 'content': '已停止解读，任务结果已保存'})
+                    return
                 except Exception:
                     interpretation = 'LLM 解读暂不可用。'
                 heading, _, body = reply.content.partition('\n\n')
                 message.content = f'{heading}\n\n{interpretation}\n\n{body}'
                 session.save(messages)
                 send({'type': 'assistant_update', 'content': message.content})
+        except SessionConflict:
+            raise
         except Exception as exc:
-            answer = f'任务未完成：{exc}'
-            messages.append(AssistantMessage(content=answer))
+            try:
+                if checkpoint:
+                    checkpoint()
+            except RunCancelled as cancelled:
+                exc = cancelled
+            answer = str(exc) if isinstance(exc, RunCancelled) else f'任务未完成：{exc}'
+            messages.append(AssistantMessage(content=answer, workflow=True))
             session.save(messages)
             send({'type': 'error', 'content': answer})

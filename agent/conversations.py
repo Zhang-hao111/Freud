@@ -2,15 +2,16 @@
 
 from contextlib import contextmanager
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock
 
-from agent.core import build_chat_system_prompt, build_memory_block
-from agent.events import Emit
+from agent.core import build_chat_system_prompt
+from agent.events import Emit, RunCancelled
 from agent.llm import MockLLM
 from agent.permissions import MODES
 from agent.session import Session, SessionMemory
 from agent.tool_execution import record_tool_reply
-from agent.types import Action, SystemMessage, UserMessage
+from agent.tracer import Tracer
+from agent.types import Action, AssistantMessage, SystemMessage, UserMessage
 
 
 class Conversations:
@@ -20,11 +21,11 @@ class Conversations:
         self.workflows = runtime['workflows']
         self.workspaces = runtime['workspaces']
         self.mock = runtime['models'].mock
-        self.active = set()
+        self.active = {}
         self.lock = Lock()
 
     def session(self, session_id):
-        return next((s for s in self.store.list() if s.data['id'] == session_id), None)
+        return self.store.get(session_id)
 
     def new_session(self, workspace_id='default'):
         workspace = self.workspaces.get(workspace_id)
@@ -41,7 +42,9 @@ class Conversations:
 
     def list_sessions(self):
         workspace_ids = self.workspace_ids()
-        return [self.session_info(session, workspace_ids) for session in self.store.list()]
+        return [{'id': row['id'], 'title': row['title'],
+                 'workspace_id': workspace_ids.get(str(Path(row['workspace'] or self.workspaces.default['path']).resolve()))}
+                for row in self.store.summaries()]
 
     def workspace_ids(self):
         return {row['path']: row['id'] for row in self.workspaces.list()}
@@ -63,7 +66,26 @@ class Conversations:
             if not session:
                 return False
             self.store.delete(session)
+            if traces_dir := self.runtime.config.get('traces_dir'):
+                Tracer.delete_session(traces_dir, session_id)
             return True
+
+    def cancel(self, session_id):
+        with self.lock:
+            event = self.active.get(session_id)
+            if event is None:
+                return False
+            event.set()
+            return True
+
+    def run_status(self, session_id):
+        with self.lock:
+            event = self.active.get(session_id)
+            return 'idle' if event is None else 'cancelling' if event.is_set() else 'running'
+
+    def checkpoint(self, session_id):
+        if self.run_status(session_id) == 'cancelling':
+            raise RunCancelled('任务已取消')
 
     @contextmanager
     def _session_turn(self, session):
@@ -79,41 +101,45 @@ class Conversations:
             directory = self.workspaces.session_directory(session)
             if not directory.is_dir() or str(directory) not in self.workspace_ids():
                 raise ValueError('请先添加此对话所在的工作区，并确认目录仍然存在。')
-            self.active.add(session_id)
+            self.active[session_id] = Event()
         try:
             yield str(directory)
         finally:
             with self.lock:
-                self.active.discard(session_id)
+                self.active.pop(session_id, None)
 
     def run_workflow(self, session, text, request, emit: Emit):
         if self.mock:
             emit({'type': 'error', 'content': 'Mock 模式不运行数据任务；请去掉 --mock 后重启。'})
             return
         with self._session_turn(session):
-            self.workflows.run(session, text, request, emit)
+            self.workflows.run(session, text, request, emit, checkpoint=lambda: self.checkpoint(session.data['id']))
 
     def chat(self, session, text, emit: Emit, followup=False, permission_mode='ask', *, approve=None):
         if permission_mode not in MODES:
             raise ValueError('权限模式无效')
         with self._session_turn(session) as workspace:
+            def checkpoint():
+                self.checkpoint(session.data['id'])
+
             context = self.workflows.context(session) if followup else None
             if context:
-                self.workflows.run(session, text, {'mode': 'followup', 'target': context['target']}, emit)
+                self.workflows.run(session, text, {'mode': 'followup', 'target': context['target']}, emit,
+                                   checkpoint=checkpoint)
             else:
-                self._run_chat(session, text, emit, permission_mode, workspace, approve)
+                self._run_chat(session, text, emit, permission_mode, workspace, approve, checkpoint)
 
-    def _run_chat(self, session, text, emit, permission_mode, workspace, approve):
+    def _run_chat(self, session, text, emit, permission_mode, workspace, approve, checkpoint):
         messages = session.messages
         memory = SessionMemory(session, live_messages=messages)
-        tracer = self.runtime['tracer']()
+        tracer = self.runtime['tracer'](session.data['id'])
         try:
             if not messages:
-                messages.append(SystemMessage(content=build_chat_system_prompt(workspace) + build_memory_block(memory)))
+                messages.append(SystemMessage(content=build_chat_system_prompt(workspace)))
             session.note_title(text)
             messages.append(UserMessage(content=text))
             session.save(messages)
-            registry = self.runtime['tools'](workspace)
+            registry = self.runtime['tools'](workspace, checkpoint=checkpoint)
             mock_model = MockLLM([
                 Action(type='call_tool', tool='write_file', args={'path': 'mock.txt', 'content': '演示内容'},
                        tool_call_id='mock_1'),
@@ -131,6 +157,7 @@ class Conversations:
                     result = '已记录笔记'
                 else:
                     emit({'type': 'tool', 'tool': action.tool, 'args': action.args or {}})
+                    checkpoint()
                     outcome = self.runtime['execute_tool'](
                         registry, action, mode=permission_mode, mock=self.mock,
                         approve=approve,
@@ -151,14 +178,18 @@ class Conversations:
             finished = self.runtime['chat_loop'](
                 messages, llm, registry.list(), handle_action,
                 lambda reply: emit({'type': 'assistant', 'content': reply}),
-                max_steps=self.runtime.config['max_steps'], after_step=memory.consolidate,
+                max_steps=self.runtime.config['max_steps'], after_step=memory.consolidate, memory=memory,
+                checkpoint=checkpoint,
             )
             if not finished:
                 emit({'type': 'error', 'content': '已达到最大执行步数。'})
+        except RunCancelled as exc:
+            messages.append(AssistantMessage(content=str(exc)))
+            emit({'type': 'error', 'content': str(exc)})
         except Exception as exc:
             emit({'type': 'error', 'content': str(exc)})
         finally:
-            session.save(messages)
+            memory.consolidate()
             tracer.flush()
 
 

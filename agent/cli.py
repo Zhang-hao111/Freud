@@ -8,13 +8,13 @@ from pathlib import Path
 
 from agent.config import load_config, save_config, ensure_config
 from agent.core import (run_agent, _print_tool_call, _print_result,
-                        build_chat_system_prompt, build_memory_block)
+                        build_chat_system_prompt)
 from agent import term, ui
 from agent.llm import MockLLM
 from agent.permissions import chip, cycle
 from agent.runtime import default_runtime
 from agent.tool_execution import record_tool_reply
-from agent.session import DEFAULT_TITLE, Session, SessionStore, SessionMemory, time_ago
+from agent.session import DEFAULT_TITLE, Session, SessionConflict, SessionStore, SessionMemory, time_ago
 from agent.types import (
     Action, SystemMessage, UserMessage,
 )
@@ -236,7 +236,7 @@ def _repl_handle_action(action, messages, runtime, registry, memory, mock, state
         print(ui.render_result_line(value or '(空)', True))
     elif action.type == 'call_tool':
         def approve(action, gate, reason):
-            if gate == 'escalate':
+            if gate in ('escalate', 'shell'):
                 try:
                     answer = input(ui.paint('yellow', f'  ⚡ {reason} · 批准执行? [y/N] '))
                 except (EOFError, KeyboardInterrupt):
@@ -286,21 +286,21 @@ def _repl_handle_action(action, messages, runtime, registry, memory, mock, state
 
 def _pick_session(store: SessionStore, exclude_id: str | None = None) -> Session | None:
     """列出历史会话供选择（/resume）：TTY 用方向键，非 TTY 输入序号。"""
-    sessions = [s for s in store.list() if s.data.get('id') != exclude_id]
+    sessions = [row for row in store.summaries() if row['id'] != exclude_id]
     if not sessions:
         print('  暂无历史会话。')
         return None
-    options = [s.data.get('title', DEFAULT_TITLE) for s in sessions]
-    hints = [f"{time_ago(s.data.get('updated_at', ''))} · {len(s.memory)} 条笔记 · "
-             f"{s.data.get('workspace', '')}" for s in sessions]
+    options = [row.get('title') or DEFAULT_TITLE for row in sessions]
+    hints = [f"{time_ago(row.get('updated_at') or '')} · {row['memory_count']} 条笔记 · "
+             f"{row.get('workspace') or ''}" for row in sessions]
     idx = term.choose(options, title=f'恢复会话（共 {len(sessions)} 个）', hints=hints)
     if idx is None:
         print('  已取消。')
         return None
-    return sessions[idx]
+    return store.get(sessions[idx]['id'])
 
 
-def repl(mock: bool = False, max_steps: int = 30, resume: bool = False):
+def repl(mock: bool = False, max_steps: int | None = None, resume: bool = False):
     """交互式 REPL 主循环 — 持续对话模式。
 
     会话模型：新会话的记忆从零开始（不注入历史），每个会话独立落盘；
@@ -308,26 +308,29 @@ def repl(mock: bool = False, max_steps: int = 30, resume: bool = False):
     """
     ensure_config()
     config = load_config()
+    max_steps = config['max_steps'] if max_steps is None else max_steps
     if not mock and not config.get('api_key'):
         print('[!] 错误：未设置 API Key。')
         print('   请先配置: /key = sk-xxx')
         return
     runtime = default_runtime(config, mock=mock)
-    tracer = runtime['tracer']()
     store = runtime['sessions']
     models = runtime['models']
     mock_model = MockLLM(responses=[]) if mock else None
 
     # 新会话：记忆从零开始
     session = store.new(workspace=str(Path(config['workspace']).expanduser().resolve()))
-    memory = SessionMemory(session, live_messages=session.messages)
+    tracer = runtime['tracer'](session.data['id'])
     messages = session.messages
+    memory = SessionMemory(session, live_messages=messages)
 
     def _switch_to(target: Session):
-        nonlocal session, memory, messages
+        nonlocal session, memory, messages, tracer
+        tracer.flush()
         session = target
-        memory = SessionMemory(session, live_messages=session.messages)
+        tracer = runtime['tracer'](session.data['id'])
         messages = session.messages
+        memory = SessionMemory(session, live_messages=messages)
 
     _print_banner(mock=mock, config=config)
 
@@ -409,7 +412,7 @@ def repl(mock: bool = False, max_steps: int = 30, resume: bool = False):
                 tools = [] if mock else registry.list()
                 # 首次对话时初始化消息
                 if not messages:
-                    system_prompt = build_chat_system_prompt(workspace) + build_memory_block(memory)
+                    system_prompt = build_chat_system_prompt(workspace)
                     messages.append(SystemMessage(content=system_prompt))
 
                 if intent['type'] == 'run':
@@ -434,8 +437,10 @@ def repl(mock: bool = False, max_steps: int = 30, resume: bool = False):
                     tracer.record(action_step, action, result=summary)
 
                 try:
-                    runtime['chat_loop'](messages, models.chat(mock_model), tools, handle_action,
-                                         lambda reply: print(f'\n{reply}\n'))
+                    finished = runtime['chat_loop'](messages, models.chat(mock_model), tools, handle_action,
+                                                    lambda reply: print(f'\n{reply}\n'), max_steps=max_steps, memory=memory)
+                    if not finished:
+                        print(f'  ⚠ 已达到最大执行步数 ({max_steps})。')
                 except Exception as error:
                     print(f'  ⚠ LLM 调用失败: {error}')
                 # 每轮对话结束落盘（记忆 + 消息历史）
@@ -474,7 +479,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         '--max-steps',
         type=int,
-        default=30,
+        default=None,
         help='最大迭代步数（默认 30）',
     )
     parser.add_argument(
@@ -519,8 +524,9 @@ def run(args: argparse.Namespace) -> str:
     # batch 模式：每次任务运行也是一个独立会话
     session = runtime['sessions'].new(workspace=workspace)
     session.note_title(args.name or 'batch 任务')
-    memory = SessionMemory(session)
-    tracer = runtime['tracer']()
+    messages = session.messages
+    memory = SessionMemory(session, live_messages=messages)
+    tracer = runtime['tracer'](session.data['id'])
 
     # escalate 审批策略：--yes 全自动批准；交互终端人工确认；非交互默认拒绝
     if args.yes:
@@ -537,11 +543,12 @@ def run(args: argparse.Namespace) -> str:
         tool_registry=runtime['tools'](workspace),
         memory=memory,
         tracer=tracer,
-        max_steps=args.max_steps,
+        max_steps=config['max_steps'] if args.max_steps is None else args.max_steps,
         approver=approver,
         workspace=workspace,
         tool_executor=runtime['execute_tool'],
         chat_loop=runtime['chat_loop'],
+        messages=messages,
     )
     session.save()
     return answer
@@ -551,12 +558,16 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
 
-    if not args.file:
-        repl(mock=args.mock, max_steps=args.max_steps, resume=args.resume)
-        return
-
-    answer = run(args)
-    print(f'\n结果: {answer}')
+    if args.max_steps is not None and args.max_steps < 1:
+        parser.error('--max-steps 必须大于 0')
+    try:
+        if not args.file:
+            repl(mock=args.mock, max_steps=args.max_steps, resume=args.resume)
+        else:
+            answer = run(args)
+            print(f'\n结果: {answer}')
+    except SessionConflict as error:
+        parser.exit(1, f'{error}\n')
 
 
 if __name__ == '__main__':

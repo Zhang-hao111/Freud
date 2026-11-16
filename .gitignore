@@ -24,6 +24,7 @@ CLAUDE.md
 # Web 构建依赖与产物
 web/node_modules/
 web/dist/
+/agent/web_dist/
 
 # 本地实验 clone
 /work/freud-llm/

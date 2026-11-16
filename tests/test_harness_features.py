@@ -57,7 +57,7 @@ class RetryTest(unittest.TestCase):
         def flaky(*a, **kw):
             calls['n'] += 1
             if calls['n'] < 3:
-                raise RuntimeError('transient')
+                raise TimeoutError('transient')
             return _fake_api_response()
 
         orig = self._no_sleep()
@@ -73,20 +73,40 @@ class RetryTest(unittest.TestCase):
 
         def always_fail(*a, **kw):
             calls['n'] += 1
-            raise RuntimeError('down')
+            raise TimeoutError('down')
 
         orig = self._no_sleep()
         try:
-            with self.assertRaises(RuntimeError):
+            with self.assertRaises(TimeoutError):
                 self._provider(always_fail).chat([UserMessage(content='hi')], [])
         finally:
             llm_mod.time.sleep = orig
         self.assertEqual(calls['n'], OpenAIProvider.MAX_RETRIES)
 
+    def test_batch_does_not_retry_authentication_error(self):
+        class AuthenticationError(RuntimeError):
+            status_code = 401
+
+        calls = []
+
+        def denied(*args, **kwargs):
+            calls.append(kwargs)
+            raise AuthenticationError('fixture invalid credential')
+
+        with tempfile.TemporaryDirectory() as tmp:
+            messages = []
+            answer = run_agent('g', 't', self._provider(denied), create_default_registry(),
+                               FileMemory(f'{tmp}/memory.json'), Tracer(f'{tmp}/traces'),
+                               max_steps=30, workspace=tmp, messages=messages)
+        self.assertEqual(len(calls), 1)
+        self.assertIn('fixture invalid credential', answer)
+        self.assertIsInstance(messages[-1], AssistantMessage)
+        self.assertEqual(messages[-1].content, answer)
+
 
 class MemoryInjectionTest(unittest.TestCase):
-    def test_memory_visible_in_system_prompt(self):
-        """写入的记忆必须出现在下一轮任务的系统提示中（写读闭环）。"""
+    def test_memory_visible_as_reference_data(self):
+        """笔记供模型参考，并与系统指令分离。"""
         with tempfile.TemporaryDirectory() as tmp:
             mem = FileMemory(f'{tmp}/m.json')
             mem.write('用户偏好', '使用 Python 实现')
@@ -101,8 +121,9 @@ class MemoryInjectionTest(unittest.TestCase):
 
             sys_msg = llm.seen[0][0]
             self.assertIsInstance(sys_msg, SystemMessage)
-            self.assertIn('用户偏好', sys_msg.content)
-            self.assertIn('使用 Python 实现', sys_msg.content)
+            self.assertNotIn('用户偏好', sys_msg.content)
+            self.assertIsInstance(llm.seen[0][1], UserMessage)
+            self.assertIn('用户偏好: 使用 Python 实现', llm.seen[0][1].content)
 
     def test_build_memory_block_empty_and_none(self):
         self.assertEqual(build_memory_block(None), '')

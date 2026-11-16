@@ -89,6 +89,7 @@ def save_config(updates: dict) -> Path:
             pass
 
     existing.update(updates)
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
     cfg_path.write_text(
         json.dumps(existing, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
@@ -107,6 +108,7 @@ def ensure_config() -> Path:
         "model": "deepseek-chat",
         "api_base": "https://api.deepseek.com",
     }
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
     cfg_path.write_text(
         json.dumps(defaults, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",

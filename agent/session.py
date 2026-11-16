@@ -7,10 +7,14 @@
 - /resume 列出历史会话，选中后恢复其记忆与对话上下文。
 """
 
+import fcntl
 import json
 import os
+import shutil
+import tempfile
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -21,6 +25,42 @@ from agent.types import (
 SESSIONS_DIR = Path.home() / '.agent-harness' / 'sessions'
 LEGACY_MEMORY = Path.home() / '.agent-harness' / 'memory.json'
 DEFAULT_TITLE = '(未命名会话)'
+
+
+@contextmanager
+def _write_lock(directory):
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def _write_json(path, data):
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=f'.{path.name}.')
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as file:
+            json.dump(data, file, ensure_ascii=False)
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def _cached_summary(path):
+    try:
+        record = json.loads(path.with_suffix('.meta').read_text(encoding='utf-8'))
+        if (record['mtime'] == path.stat().st_mtime_ns
+                and all(key in record for key in ('id', 'title', 'workspace', 'updated_at', 'revision', 'memory_count'))):
+            return record
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return None
+
+
+class SessionConflict(ValueError):
+    pass
 
 
 def _now_iso() -> str:
@@ -63,12 +103,18 @@ def dump_messages(messages: list[Message]) -> list[dict]:
             out.append({'role': 'system', 'content': m.content})
         elif isinstance(m, UserMessage):
             out.append({'role': 'user', 'content': m.content})
+            if m.workflow:
+                out[-1]['workflow'] = True
+            if m.internal:
+                out[-1]['internal'] = True
         elif isinstance(m, AssistantMessage):
             out.append({
                 'role': 'assistant',
                 'content': m.content,
                 'tool_calls': [_dump_tool_call(tc) for tc in (m.tool_calls or [])],
             })
+            if m.workflow:
+                out[-1]['workflow'] = True
         elif isinstance(m, ToolMessage):
             out.append({'role': 'tool', 'content': m.content, 'tool_call_id': m.tool_call_id})
     return out
@@ -81,9 +127,11 @@ def load_messages(data: list[dict]) -> list[Message]:
         if role == 'system':
             out.append(SystemMessage(content=d.get('content', '')))
         elif role == 'user':
-            out.append(UserMessage(content=d.get('content', '')))
+            out.append(UserMessage(content=d.get('content', ''), workflow=d.get('workflow', False),
+                                   internal=d.get('internal', False)))
         elif role == 'assistant':
-            out.append(AssistantMessage(content=d.get('content'), tool_calls=d.get('tool_calls') or []))
+            out.append(AssistantMessage(content=d.get('content'), tool_calls=d.get('tool_calls') or [],
+                                        workflow=d.get('workflow', False)))
         elif role == 'tool':
             out.append(ToolMessage(content=d.get('content', ''), tool_call_id=d.get('tool_call_id', '')))
     return out
@@ -96,6 +144,7 @@ class Session:
 
     def __init__(self, path: Path, data: dict | None = None, workspace: str = '.'):
         self.path = path
+        self._persisted = data is not None
         if data is None:
             data = {
                 'version': 1,
@@ -140,18 +189,62 @@ class Session:
 
     # ---- 持久化 ----
 
+    @property
+    def metadata_path(self):
+        return self.path.with_suffix('.meta')
+
+    @property
+    def artifacts_dir(self):
+        return self.path.with_suffix('.artifacts')
+
+    def summary(self):
+        return {**{key: self.data.get(key) for key in ('id', 'title', 'workspace', 'updated_at')},
+                'memory_count': len(self.data.get('memory') or [])}
+
+    def _cache_summary(self):
+        try:
+            _write_json(self.metadata_path, {**self.summary(), 'revision': self.data.get('revision', 0),
+                                             'mtime': self.path.stat().st_mtime_ns})
+        except OSError:
+            # 元数据只是缓存，下次读取可回退到原始会话。
+            pass
+
+    def _check_revision(self):
+        if self.path.exists():
+            current = _cached_summary(self.path)
+            if current is None:
+                current = self.from_path(self.path).data
+            if self._persisted and current.get('revision', 0) == self.data.get('revision', 0):
+                return
+        elif not self._persisted:
+            return
+        raise SessionConflict('会话已被另一进程更新或删除，请重新打开后重试。')
+
     def save(self, messages: list[Message] | None = None):
-        if messages is not None:
-            self.store_messages(messages)
-        self.touch()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix('.tmp')
-        tmp.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding='utf-8')
-        os.replace(tmp, self.path)
+        with _write_lock(self.path.parent):
+            self._check_revision()
+            revision = self.data.get('revision', 0) + 1
+            if messages is not None:
+                self.store_messages(messages)
+            self.touch()
+            _write_json(self.path, {**self.data, 'revision': revision})
+            self.data['revision'] = revision
+            self._persisted = True
+            self._cache_summary()
+
+    def save_json_artifact(self, name, data):
+        if Path(name).name != name or not name.endswith('.json'):
+            raise ValueError('会话产物文件名无效')
+        with _write_lock(self.path.parent):
+            self._check_revision()
+            self.artifacts_dir.mkdir(mode=0o700, exist_ok=True)
+            _write_json(self.artifacts_dir / name, data)
 
     @classmethod
     def from_path(cls, path: Path) -> 'Session':
         data = json.loads(path.read_text(encoding='utf-8'))
+        if not isinstance(data, dict) or not isinstance(data.get('id'), str):
+            raise ValueError('会话文件格式无效')
         return cls(path, data=data)
 
 
@@ -164,15 +257,52 @@ class SessionStore:
         self._import_legacy()
 
     def new(self, workspace: str = '.') -> Session:
-        session = Session(self.dir / f"session-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}.json",
-                          workspace=workspace)
+        session = Session(self.dir, workspace=workspace)
+        session.path = self.dir / f"session-{session.data['id']}.json"
         session.save()
         return session
 
     def delete(self, session: Session):
-        if session.path.name.startswith('session-legacy-'):
-            (self.dir / '.legacy-imported').touch()
-        session.path.unlink()
+        with _write_lock(self.dir):
+            if session.path.name.startswith('session-legacy-'):
+                (self.dir / '.legacy-imported').touch()
+            session.path.unlink()
+            session.metadata_path.unlink(missing_ok=True)
+            if session.artifacts_dir.is_dir():
+                shutil.rmtree(session.artifacts_dir)
+
+    def summaries(self):
+        return sorted((row for _, row in self._summary_rows()), key=lambda row: row['updated_at'] or '', reverse=True)
+
+    def _summary_rows(self):
+        for path in self.dir.glob('session-*.json'):
+            summary = _cached_summary(path)
+            if summary is None:
+                try:
+                    with _write_lock(self.dir):
+                        session = Session.from_path(path)
+                        summary = session.summary()
+                        session._cache_summary()
+                except (OSError, ValueError):
+                    continue
+            yield path, summary
+
+    def get(self, session_id):
+        if not isinstance(session_id, str) or '/' in session_id or '\\' in session_id:
+            return None
+        try:
+            session = Session.from_path(self.dir / f'session-{session_id}.json')
+            if session.data['id'] == session_id:
+                return session
+        except (OSError, ValueError):
+            pass
+        for path, summary in self._summary_rows():
+            if summary['id'] == session_id:
+                try:
+                    return Session.from_path(path)
+                except (OSError, ValueError):
+                    return None
+        return None
 
     def list(self) -> list[Session]:
         """按最近更新时间倒序返回全部会话。"""
@@ -182,7 +312,7 @@ class SessionStore:
         for p in self.dir.glob('session-*.json'):
             try:
                 sessions.append(Session.from_path(p))
-            except (json.JSONDecodeError, OSError):
+            except (ValueError, OSError):
                 continue
         sessions.sort(key=lambda s: s.data.get('updated_at', ''), reverse=True)
         return sessions
@@ -243,5 +373,5 @@ class SessionMemory:
         """把记忆条目（连同当前消息历史）写回会话文件。"""
         if self._dirty:
             self.session.set_memory(list(self._entries.values()))
-            self._dirty = False
         self.session.save(self.live_messages)
+        self._dirty = False

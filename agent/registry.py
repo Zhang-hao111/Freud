@@ -1,9 +1,12 @@
 """工具系统 — read_file / write_file / shell 以及 ToolRegistry。"""
 
 import os
-import re
+import selectors
+import signal
 import subprocess
+import time
 
+from agent.execution_scope import sandbox_command, workspace_file
 from agent.types import BaseTool, ToolResult
 
 
@@ -15,9 +18,7 @@ def _clip(text: str) -> str:
     """过长的工具输出截断并附加说明。"""
     if not text or len(text) <= MAX_TOOL_OUTPUT:
         return text
-    return text[:MAX_TOOL_OUTPUT] + (
-        f'\n...[输出过长已截断：原始 {len(text)} 字符，仅保留前 {MAX_TOOL_OUTPUT} 字符]'
-    )
+    return text[:MAX_TOOL_OUTPUT] + '\n...[输出过长已截断]'
 
 
 # ---- 工具实现 ----
@@ -43,8 +44,9 @@ class ReadFileTool(BaseTool):
             return ToolResult(success=False, error='缺少 path 参数')
         file_path = os.path.abspath(os.path.join(self.workspace or '', raw))
         try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
+            source = workspace_file(self.workspace, raw) if self.workspace else open(file_path, encoding='utf-8')
+            with source as f:
+                content = f.read(MAX_TOOL_OUTPUT + 1)
             return ToolResult(success=True, data=_clip(content))
         except FileNotFoundError:
             return ToolResult(success=False, error=f'文件不存在: {file_path}')
@@ -71,13 +73,15 @@ class WriteFileTool(BaseTool):
         raw = args.get('path', '')
         if not isinstance(raw, str) or not raw.strip():
             return ToolResult(success=False, error='缺少 path 参数')
-        content = args.get('content', '')
+        content = args.get('content')
         if not isinstance(content, str):
-            content = str(content)
+            return ToolResult(success=False, error='content 参数必须是字符串')
         file_path = os.path.abspath(os.path.join(self.workspace or '', raw))
         try:
-            os.makedirs(os.path.dirname(file_path), exist_ok=True)
-            with open(file_path, 'w', encoding='utf-8') as f:
+            if not self.workspace:
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            target = workspace_file(self.workspace, raw, write=True) if self.workspace else open(file_path, 'w', encoding='utf-8')
+            with target as f:
                 f.write(content)
             return ToolResult(success=True, data=f'已写入 {file_path}')
         except Exception as e:
@@ -95,42 +99,63 @@ class ShellTool(BaseTool):
         'required': ['command'],
     }
 
-    def __init__(self, timeout: int = 30, workspace: str | None = None):
+    def __init__(self, timeout: int = 30, workspace: str | None = None, checkpoint=None):
         self.timeout = timeout
         self.workspace = workspace
+        self.checkpoint = checkpoint
 
     def execute(self, args: dict) -> ToolResult:
         raw = args.get('command', '')
         if not isinstance(raw, str) or not raw.strip():
             return ToolResult(success=False, error='缺少 command 参数')
         try:
-            result = subprocess.run(
-                raw,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout,
-                cwd=self.workspace,
-            )
-            output = ''
-            if result.stdout:
-                output += result.stdout
-            if result.stderr:
-                if output:
-                    output += '\n--- stderr ---\n'
-                output += result.stderr
-            if result.returncode == 0:
+            argv = sandbox_command(self.workspace, raw) if self.workspace else ['/bin/sh', '-c', raw]
+            output, code = self._run(argv)
+            if code == 0:
                 return ToolResult(success=True, data=_clip(output))
             else:
                 return ToolResult(
                     success=False,
                     data=_clip(output) if output else '',
-                    error=f'返回码 {result.returncode}',
+                    error=f'返回码 {code}',
                 )
         except subprocess.TimeoutExpired:
             return ToolResult(success=False, error=f'命令执行超时 ({self.timeout}s)')
-        except Exception as e:
+        except (OSError, ValueError) as e:
             return ToolResult(success=False, error=f'执行失败: {e}')
+
+    def _run(self, argv):
+        deadline = time.monotonic() + self.timeout
+        output = bytearray()
+        with subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                              start_new_session=True) as process, selectors.DefaultSelector() as selector:
+            try:
+                selector.register(process.stdout, selectors.EVENT_READ)
+                while selector.get_map() or process.poll() is None:
+                    if self.checkpoint:
+                        self.checkpoint()
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(argv, self.timeout)
+                    if not selector.get_map():
+                        time.sleep(min(remaining, .1))
+                        continue
+                    for key, _ in selector.select(min(remaining, .1)):
+                        chunk = os.read(key.fd, 65536)
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                        elif len(output) <= MAX_TOOL_OUTPUT:
+                            output.extend(chunk[:MAX_TOOL_OUTPUT + 1 - len(output)])
+                clipped = len(output) > MAX_TOOL_OUTPUT
+                text = output[:MAX_TOOL_OUTPUT].decode('utf-8', errors='replace')
+                return text + ('\n...[输出过长已截断]' if clipped else ''), process.returncode
+            except BaseException:
+                # 终止管道内可能继续持有 stdout 的子进程。
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                raise
 
 
 # ---- 工具注册表 ----
@@ -160,10 +185,10 @@ class ToolRegistry:
         return tool.execute(args)
 
 
-def create_default_registry(shell_timeout: int = 30, *, workspace: str | None = None) -> ToolRegistry:
+def create_default_registry(shell_timeout: int = 30, *, workspace: str | None = None, checkpoint=None) -> ToolRegistry:
     """创建包含默认三件套的工具注册表。"""
     registry = ToolRegistry()
     registry.register(ReadFileTool(workspace))
     registry.register(WriteFileTool(workspace))
-    registry.register(ShellTool(timeout=shell_timeout, workspace=workspace))
+    registry.register(ShellTool(timeout=shell_timeout, workspace=workspace, checkpoint=checkpoint))
     return registry

@@ -30,6 +30,10 @@ freud-web = "agent.web:main"
 
 [tool.setuptools.packages.find]
 include = ["agent*"]
+namespaces = false
+
+[tool.setuptools.package-data]
+agent = ["web_dist/*", "web_dist/static/*", "web_dist/static/media/*"]
 
 [tool.uv.workspace]
 members = ["plugins/movielens"]

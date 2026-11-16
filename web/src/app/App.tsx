@@ -59,12 +59,15 @@ export const App = () => {
   const [fieldValues, setFieldValues] = useState<Record<string, string>>({})
   const [optionsText, setOptionsText] = useState('')
   const [busy, setBusy] = useState(false)
+  const [remoteRun, setRemoteRun] = useState(false)
+  const [stopping, setStopping] = useState(false)
   const [loadingSession, setLoadingSession] = useState(false)
   const [error, setError] = useState('')
   const feed = useRef<HTMLDivElement>(null)
   const selection = useRef(0)
   const lastItem = items.at(-1)
   const selectedTask = tasks.find(task => task.id === mode)
+  const running = busy || remoteRun
   const followupLabel = tasks.find(task => task.id === followupTarget)?.result_label || '结果'
   const workspace = workspaces.find(row => row.id === (current ? current.workspace_id : workspaceId))
   const groups = [...workspaces, ...(sessions.some(session => session.workspace_id === null) ? [{ id: null, title: '未分组', path: '' }] : [])]
@@ -95,6 +98,7 @@ export const App = () => {
   }
   function newSession(next = workspaceId) {
     selection.current++
+    setRemoteRun(false); setStopping(false)
     setLoadingSession(false)
     setWorkspaceId(next); setCurrent(null); setItems([]); setDraft(''); chooseMode('chat'); setPermissionMode('ask'); setFollowupTarget(null); setError(''); setSidebarOpen(false)
   }
@@ -120,12 +124,14 @@ export const App = () => {
     try {
       const data = await api(`/api/sessions/${encodeURIComponent(session.id)}`)
       if (request !== selection.current) return
+      setRemoteRun(data.run_status === 'running' || data.run_status === 'cancelling')
+      setStopping(data.run_status === 'cancelling')
       const history: Item[] = []
       const doneCalls = new Set<string>()
       for (const message of data.messages) {
-        if (message.role === 'user') history.push({ type: 'user', content: message.content })
+        if (message.role === 'user' && !message.internal) history.push({ type: 'user', content: message.content })
         if (message.role === 'assistant') {
-          if (message.content) history.push({ type: 'assistant', content: message.content })
+          if (message.content) history.push({ type: 'assistant', content: message.content, workflow_result: message.workflow || undefined })
           for (const call of message.tool_calls || []) {
             const name = call.function?.name
             if (name === 'done') doneCalls.add(call.id)
@@ -143,9 +149,38 @@ export const App = () => {
       if (request === selection.current) setLoadingSession(false)
     }
   }
+  useEffect(() => {
+    if (!remoteRun || !current) return
+    const session = current
+    const request = selection.current
+    const timer = window.setInterval(async () => {
+      try {
+        const state = await api(`/api/sessions/${encodeURIComponent(session.id)}/status`)
+        if (request !== selection.current) return
+        if (state.run_status === 'idle') {
+          window.clearInterval(timer)
+          void select(session)
+        } else setStopping(state.run_status === 'cancelling')
+      } catch {
+        window.clearInterval(timer)
+      }
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [remoteRun, current?.id])
+  async function stopRun() {
+    if (!current || stopping) return
+    const request = selection.current
+    setStopping(true)
+    try {
+      await api(`/api/sessions/${encodeURIComponent(current.id)}/cancel`, {})
+      if (request === selection.current) setItems(old => old.map(item => item.type === 'approval' ? { ...item, type: 'progress', content: '已请求停止' } : item))
+    } catch (e) {
+      if (request === selection.current) { setStopping(false); setError(String(e)) }
+    }
+  }
   async function send() {
     const text = draft.trim()
-    if (!text || busy || savingWorkspace || loadingSession) return
+    if (!text || running || savingWorkspace || loadingSession) return
     let taskPayload
     try {
       taskPayload = workflowPayload(selectedTask, fieldValues, optionsText)
@@ -181,10 +216,10 @@ export const App = () => {
       setFollowupTarget(updated.followup_context?.target || null)
       if (!failed && mode !== 'chat') chooseMode('chat')
       await refresh()
-    } catch (e) { setError(String(e)) } finally { setBusy(false) }
+    } catch (e) { setError(String(e)) } finally { setBusy(false); setStopping(false) }
   }
   async function endFollowup() {
-    if (!current || busy || loadingSession) return
+    if (!current || running || loadingSession) return
     const request = selection.current
     try {
       await api(`/api/sessions/${encodeURIComponent(current.id)}/end-context`, {})
@@ -194,7 +229,7 @@ export const App = () => {
     }
   }
   async function removeSession(session: Session) {
-    if (busy || !window.confirm(`删除对话“${session.title}”？此操作不可撤销。`)) return
+    if (running || !window.confirm(`删除对话“${session.title}”？此操作不可撤销。`)) return
     const request = selection.current
     try {
       const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}`, { method: 'DELETE', headers: { 'Content-Type': 'application/json' } })
@@ -242,7 +277,7 @@ export const App = () => {
       </div></header>
       <div className="feed" ref={feed} aria-busy={busy || loadingSession}><div className="conversation-column content">{!current && !items.length && !loadingSession && !error && <div className="welcome"><h1>有什么可以帮你？</h1></div>}
         {items.map((item, index) => item.type === 'user' ? <div key={index} className="bubble">{item.content}</div> : item.type === 'assistant' ? <AssistantReply key={index} content={item.content || ''} workflowResult={item.workflow_result} /> : item.type === 'tool' ? <details key={index} className="tool"><summary>{item.tool}</summary><pre>{JSON.stringify(item.args, null, 2)}</pre></details> : item.type === 'result' ? <details key={index} className="result"><summary>工具结果</summary><pre>{item.content}</pre></details> : item.type === 'approval' ? <div key={index} className="approval"><strong>需要你的确认</strong><p>{item.reason}</p><pre>{item.tool} {JSON.stringify(item.args, null, 2)}</pre><button onClick={() => void approve(item, true)}>允许执行</button><button onClick={() => void approve(item, false)}>拒绝</button></div> : <div key={index} className="process-update">{item.content}</div>)}
-        {(busy || loadingSession) && <p className="status" role="status">{loadingSession ? '正在打开对话…' : '正在处理…'}</p>}{error && <p className="error" role="alert">{error}</p>}</div></div>
+        {(running || loadingSession) && <p className="status" role="status">{loadingSession ? '正在打开对话…' : stopping ? '等待任务停止…' : '正在处理…'}</p>}{error && <p className="error" role="alert">{error}</p>}</div></div>
       <div className="conversation-column composer-wrap">
         <div className="composer-context"><div className="composer-workspace">
           <span className="folder-icon" aria-hidden="true" />
@@ -268,7 +303,8 @@ export const App = () => {
         </div>
         <div className="composer-actions">
           <select className="permission-mode" aria-label="权限模式" value={permissionMode} disabled={busy || loadingSession} onChange={e => setPermissionMode(e.target.value)}><option value="ask">询问确认</option><option value="accept">自动允许编辑</option><option value="yolo">自动批准（危险）</option></select>
-          <button className="send" disabled={busy || savingWorkspace || loadingSession || !draft.trim()} onClick={() => void send()} aria-label="发送">↑</button>
+          {running && current ? <button className="send" disabled={stopping} onClick={() => void stopRun()} aria-label="停止任务" title="停止任务">■</button>
+            : <button className="send" disabled={running || savingWorkspace || loadingSession || !draft.trim()} onClick={() => void send()} aria-label="发送">↑</button>}
         </div></div>
       </div>{mode === 'chat' && followupTarget && <div className="hint">正在基于最近的{followupLabel}继续对话 <button className="end-context" disabled={busy || loadingSession} onClick={() => void endFollowup()}>结束结果上下文</button></div>}</div>
     </main></div>

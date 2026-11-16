@@ -3,7 +3,7 @@
 import json
 import os
 import time
-from openai import OpenAI
+from openai import APIConnectionError, OpenAI
 from agent.types import (
     Message, SystemMessage, UserMessage, AssistantMessage, ToolMessage,
     Action, ToolCall, LLMResponse, BaseTool,
@@ -45,7 +45,7 @@ def build_tool_definitions(tools: list[BaseTool], include_done: bool = True,
             'type': 'function',
             'function': {
                 'name': 'take_note',
-                'description': '将一条键值对记录到记忆中，供后续会话回顾',
+                'description': '将一条键值对记录到当前会话，供后续回合参考',
                 'parameters': {
                     'type': 'object',
                     'properties': {
@@ -66,8 +66,12 @@ def parse_tool_call(tc: ToolCall) -> Action:
     name = tc.function_name
     try:
         args = json.loads(tc.function_arguments) if tc.function_arguments else {}
-    except json.JSONDecodeError:
-        args = {}
+    except (TypeError, json.JSONDecodeError):
+        args = None
+    required = {'done': ('answer',), 'take_note': ('key', 'value')}.get(name, ())
+    if not isinstance(args, dict) or any(not isinstance(args.get(key), str) for key in required):
+        return Action(type='invalid', tool=name, tool_call_id=tc.id,
+                      error='工具参数必须是 JSON 对象，必填字段须符合工具定义。')
 
     if name == 'done':
         return Action(
@@ -76,6 +80,8 @@ def parse_tool_call(tc: ToolCall) -> Action:
             tool_call_id=tc.id,
         )
     elif name == 'take_note':
+        if not args['key'].strip():
+            return Action(type='invalid', tool=name, tool_call_id=tc.id, error='笔记键不能为空。')
         return Action(
             type='take_note',
             note_key=args.get('key', ''),
@@ -106,7 +112,7 @@ class OpenAIProvider:
                 del os.environ[var]
 
         self.model = model
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self.client = OpenAI(api_key=api_key, base_url=base_url, timeout=30, max_retries=0)
 
     def _convert_messages(self, messages: list[Message]) -> list[dict]:
         result = []
@@ -154,7 +160,10 @@ class OpenAIProvider:
                 )
                 break
             except Exception as e:
-                if attempt >= self.MAX_RETRIES:
+                status = getattr(e, 'status_code', None)
+                temporary = (isinstance(e, (APIConnectionError, TimeoutError, ConnectionError))
+                             or isinstance(status, int) and (status in (408, 429) or 500 <= status < 600))
+                if attempt >= self.MAX_RETRIES or not temporary:
                     raise
                 delay = 2 ** (attempt - 1)
                 print(f'  ⚠ LLM 调用失败（第 {attempt}/{self.MAX_RETRIES} 次），{delay}s 后重试: {e}')

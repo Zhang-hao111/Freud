@@ -11,7 +11,7 @@ export default defineConfig({
   mode: production ? 'production' : 'development',
   entry: './src/main.tsx',
   output: {
-    path: path.join(root, 'dist'),
+    path: production ? path.join(root, '../agent/web_dist') : path.join(root, 'dist'),
     filename: 'static/[name].[contenthash:8].js',
     chunkFilename: 'static/[name].[contenthash:8].js',
     cssFilename: 'static/[name].[contenthash:8].css',

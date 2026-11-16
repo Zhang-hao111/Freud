@@ -14,7 +14,12 @@ class Runtime:
         self._services = {}
 
     def mount(self, install, **options):
-        install(self, **options)
+        services = self._services.copy()
+        try:
+            install(self, **options)
+        except Exception:
+            self._services = services
+            raise
 
     def provide(self, name, service):
         if name in self._services:
@@ -54,10 +59,10 @@ class Models:
 
 def install_coding(runtime):
     timeout = runtime.config.get('shell_timeout', 30)
-    runtime.provide('tools', lambda workspace: create_default_registry(timeout, workspace=workspace))
+    runtime.provide('tools', lambda workspace, **options: create_default_registry(timeout, workspace=workspace, **options))
     runtime.provide('execute_tool', execute_tool)
     runtime.provide('chat_loop', run_chat_turn)
-    runtime.provide('tracer', lambda: Tracer(runtime.config['traces_dir']))
+    runtime.provide('tracer', lambda session_id=None: Tracer(runtime.config['traces_dir'], session_id))
 
 
 def default_runtime(config, store=None, llm_factory=None, mock=False):

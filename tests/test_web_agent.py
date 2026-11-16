@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from threading import Event
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
@@ -125,7 +126,7 @@ class WebAgentTests(unittest.TestCase):
                 raise BrokenPipeError()
 
         with self.assertRaises(BrokenPipeError):
-            app.chat(session, '检查当前目录', emit)
+            app.chat(session, '检查当前目录', emit, permission_mode='accept')
         restored = app.conversations.session(session.data['id'])
         self.assertEqual(restored.messages[-1].tool_call_id, 'pwd')
         self.assertEqual(restored.messages[-1].content.strip(), self.tmp.name)
@@ -144,7 +145,7 @@ class WebAgentTests(unittest.TestCase):
     def test_duplicate_run_is_rejected(self):
         app = WebAgent(self.config, self.store, mock=True)
         session = self.store.new(workspace=self.tmp.name)
-        app.conversations.active.add(session.data['id'])
+        app.conversations.active[session.data['id']] = Event()
         with self.assertRaises(ValueError):
             app.chat(session, '测试', lambda event: None)
 
