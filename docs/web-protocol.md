@@ -4,7 +4,7 @@
 
 会话冲突拒绝新回合时，接口在开启事件流前返回 HTTP 409 与 JSON 错误。客户端保留用户的草稿，并重新读取会话。
 
-`POST /api/chat` 的结果追问请求携带 `followup: true` 和会话详情返回的 `followup_context`。结束结果上下文的请求也携带 `followup_context`。结果上下文已被其他入口替换时，这两个操作返回 HTTP 409。
+`POST /api/chat` 的结果追问请求携带 `followup: true` 和 `GET /api/sessions/{session_id}` 返回的 `followup_context`。结束结果上下文的请求也携带 `followup_context`。结果上下文已被其他入口替换时，这两个操作返回 HTTP 409。
 
 | type | 字段 | 用途 |
 | --- | --- | --- |

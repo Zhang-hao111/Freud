@@ -19,7 +19,7 @@ uv run --extra movielens freud-web
 | 接口 | 用途 |
 | --- | --- |
 | `POST /api/workflow`，指定 `session_id`、`mode: "governance"`、`text` | 以 NDJSON 返回进度、结果或失败。可在 `options` 里提供原始数据、清洗规则和评分方案版本 |
-| `POST /api/chat`，指定 `session_id`、`text` 和 `followup: true` | 在同一会话基于登记结果追问 |
+| `POST /api/chat`，指定 `session_id`、`text`、`followup: true` 和 `followup_context` | 先通过 `GET /api/sessions/{session_id}` 读取会话详情，再原样传入其中的 `followup_context`，基于该结果追问 |
 | `GET /api/workflows/{session_id}/governance-report/{task_id}` | 下载当前会话已登记的治理报告，含清洗后三表样例 |
 
 仅登记了一套默认清洗和评分方案；未指定版本时使用默认方案，指定版本必须匹配已登记版本。原始数据版本不匹配时任务失败。服务会明确报告 Hadoop 缺失、作业失败或输出为空，不会生成模拟分数。

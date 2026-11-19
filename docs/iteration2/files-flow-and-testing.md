@@ -67,7 +67,7 @@ flowchart TD
 | 方法与路径 | 用途 |
 | --- | --- |
 | `POST /api/workflow` | 指定会话、`mode: "analysis"` 和 `text`，以 NDJSON 返回状态和结果。 |
-| `POST /api/chat` | 传 `followup: true` 在当前会话依据实际结果追问。 |
+| `POST /api/chat` | 先通过 `GET /api/sessions/{session_id}` 读取会话详情，再传 `session_id`、`text`、`followup: true` 和原样返回的 `followup_context`，基于该结果追问。 |
 | `GET /api/workflows/{session_id}/training-report/{task_id}` | 获取登记的训练评价报告。 |
 | `GET /api/workflows/{session_id}/analysis-report/{task_id}` | 获取登记的查询报告。 |
 | `GET /api/workflows/{session_id}/plot/{task_id}/{algorithm}` | 获取对应算法的降维图。 |

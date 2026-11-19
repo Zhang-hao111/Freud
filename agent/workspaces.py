@@ -1,10 +1,10 @@
 """工作区注册，各会话沿用 Session 中保存的工作目录。"""
 
 import json
-import os
 import uuid
 from pathlib import Path
-from threading import Lock
+
+from agent.session import _write_json, _write_lock
 
 
 class WorkspaceRegistry:
@@ -12,7 +12,6 @@ class WorkspaceRegistry:
         self.default = {'id': 'default', 'title': '默认工作区',
                         'path': str(Path(default_dir).expanduser().resolve())}
         self.path = path
-        self.lock = Lock()
 
     def _projects(self):
         try:
@@ -42,16 +41,13 @@ class WorkspaceRegistry:
         except (OSError, RuntimeError) as exc:
             raise ValueError('无法访问项目目录，请检查路径') from exc
         canonical = str(directory)
-        with self.lock:
+        with _write_lock(self.path.parent):
             projects = self._projects()
             for record in (self.default, *projects):
                 if record['path'] == canonical:
                     return record
             record = {'id': uuid.uuid4().hex, 'title': directory.name or canonical, 'path': canonical}
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = self.path.with_name(f'.{self.path.name}.{uuid.uuid4().hex}.tmp')
-            temporary.write_text(json.dumps([*projects, record], ensure_ascii=False, indent=2), encoding='utf-8')
-            os.replace(temporary, self.path)
+            _write_json(self.path, [*projects, record])
             return record
 
 

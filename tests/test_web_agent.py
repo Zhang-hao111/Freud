@@ -10,6 +10,7 @@ from agent.llm import MockLLM
 from agent.session import SessionStore
 from agent.types import Action, AssistantMessage, ToolMessage, ToolResult, UserMessage
 from agent.web import WebAgent, make_handler
+from agent.workspaces import WorkspaceRegistry
 
 
 class WebAgentTests(unittest.TestCase):
@@ -260,6 +261,47 @@ class WebAgentTests(unittest.TestCase):
             self.assertTrue((directory / 'relative.txt').is_file())
             self.assertEqual(result[1:], ['项目文件', str(directory) + '\n'])
         self.assertEqual(len(list((root / 'traces').glob('trace-*.json'))), 2)
+
+    def test_workspace_registration_keeps_concurrent_additions(self):
+        root = Path(self.tmp.name)
+        left_path = root / 'left'
+        right_path = root / 'right'
+        left_path.mkdir()
+        right_path.mkdir()
+        path = root / 'workspaces.json'
+        left = WorkspaceRegistry(root, path)
+        right = WorkspaceRegistry(root, path)
+        first_read = Event()
+        second_read = Event()
+        release = Event()
+        left_projects = left._projects
+        right_projects = right._projects
+
+        def hold_first_snapshot():
+            projects = left_projects()
+            first_read.set()
+            if not release.wait(3):
+                raise TimeoutError('未释放第一个登记请求')
+            return projects
+
+        def watch_second_snapshot():
+            projects = right_projects()
+            second_read.set()
+            return projects
+
+        with patch.object(left, '_projects', side_effect=hold_first_snapshot), \
+             patch.object(right, '_projects', side_effect=watch_second_snapshot), ThreadPoolExecutor(2) as executor:
+            first = executor.submit(left.add, str(left_path))
+            try:
+                self.assertTrue(first_read.wait(2))
+                second = executor.submit(right.add, str(right_path))
+                if second_read.wait(.25):
+                    second.result(2)
+            finally:
+                release.set()
+            added = {first.result(2)['id'], second.result(2)['id']}
+
+        self.assertEqual({row['id'] for row in left.list()[1:]}, added)
 
 
 if __name__ == '__main__':
