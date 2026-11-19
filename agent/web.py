@@ -117,12 +117,15 @@ def make_handler(app):
             if status:
                 return self.reply(200, {'run_status': conversations.run_status(status.group(1))})
             if path.startswith('/api/sessions/'):
-                session = conversations.session(path.removeprefix('/api/sessions/'))
+                session_id = path.removeprefix('/api/sessions/')
+                # 如果任务在读取历史期间结束，让前端再刷新一次以取到最终结果。
+                run_status = conversations.run_status(session_id)
+                session = conversations.session(session_id)
                 if not session:
                     return self.reply(404, {'error': '会话不存在'})
                 return self.reply(200, {**conversations.session_info(session),
                                         'messages': dump_messages(session.messages),
-                                        'run_status': conversations.run_status(session.data['id']),
+                                        'run_status': run_status,
                                         'followup_context': conversations.workflows.context(session)})
             target = (DIST / path.lstrip('/')).resolve() if path != '/' else DIST / 'index.html'
             if not target.is_relative_to(DIST.resolve()) or not target.is_file():

@@ -33,7 +33,7 @@ def parse_boundary(value):
     return int(datetime.fromisoformat(value[:-1] + "+00:00").timestamp())
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Rating:
     user_id: int
     movie_id: int
@@ -164,57 +164,50 @@ def event_features(dataset):
     user_stats = defaultdict(empty_stat)
     movie_stats = defaultdict(empty_stat)
     global_stat = empty_stat()
-    rows = {"train": [], "validation": [], "test": []}
-    labels = {"train": [], "validation": [], "test": []}
     feature_names = ["gender_male", "age_scaled", "occupation_scaled",
                      "user_log_count", "user_mean", "user_positive_rate",
                      "movie_log_count", "movie_mean", "movie_positive_rate",
                      *[f"genre_{name}" for name in GENRES]]
 
-    for rating in dataset.ratings:
-        fallback_mean = global_stat["sum"] / global_stat["count"] if global_stat["count"] else 3.5
-        fallback_positive = global_stat["positive"] / global_stat["count"] if global_stat["count"] else 0.5
-        user_count, user_mean, user_positive = stat_values(
-            user_stats[rating.user_id], fallback_mean, fallback_positive)
-        movie_count, movie_mean, movie_positive = stat_values(
-            movie_stats[rating.movie_id], fallback_mean, fallback_positive)
-        user = dataset.users[rating.user_id]
-        genres = set(dataset.movies[rating.movie_id]["genres"])
-        values = [float(user["gender"] == "M"), user["age"] / 56.0,
-                  user["occupation"] / 20.0, user_count, user_mean / 5.0,
-                  user_positive, movie_count, movie_mean / 5.0, movie_positive,
-                  *[float(name in genres) for name in GENRES]]
-        split = "train" if rating.timestamp <= dataset.t1 else (
-            "validation" if rating.timestamp <= dataset.t2 else "test")
-        rows[split].append(values)
-        labels[split].append(int(rating.rating >= 4))
-        for stat in (user_stats[rating.user_id], movie_stats[rating.movie_id], global_stat):
-            stat["count"] += 1
-            stat["sum"] += rating.rating
-            stat["positive"] += int(rating.rating >= 4)
-
     state = {
         "feature_version": FEATURE_VERSION,
         "feature_names": feature_names,
         "cutoff": dataset.report["T1"],
-        "users": {},
-        "movies": {},
         "user_metadata": {str(key): value for key, value in dataset.users.items()},
         "movie_metadata": {str(key): value for key, value in dataset.movies.items()},
-        "global": empty_stat(),
     }
-    train_ratings = dataset.splits["train"]
-    train_user_stats = defaultdict(empty_stat)
-    train_movie_stats = defaultdict(empty_stat)
-    for rating in train_ratings:
-        for stat in (train_user_stats[rating.user_id], train_movie_stats[rating.movie_id], state["global"]):
-            stat["count"] += 1
-            stat["sum"] += rating.rating
-            stat["positive"] += int(rating.rating >= 4)
-    state["users"] = {str(key): value for key, value in train_user_stats.items()}
-    state["movies"] = {str(key): value for key, value in train_movie_stats.items()}
-    matrices = {name: np.asarray(values, dtype=float) for name, values in rows.items()}
-    targets = {name: np.asarray(values, dtype=int) for name, values in labels.items()}
+    movie_genres = {movie_id: [float(name in movie["genres"]) for name in GENRES]
+                    for movie_id, movie in dataset.movies.items()}
+    matrices = {}
+    targets = {}
+    for split in ("train", "validation", "test"):
+        ratings = dataset.splits[split]
+        matrix = matrices[split] = np.empty((len(ratings), len(feature_names)), dtype=float)
+        target = targets[split] = np.empty(len(ratings), dtype=int)
+        for index, rating in enumerate(ratings):
+            count = global_stat["count"]
+            fallback_mean = global_stat["sum"] / count if count else 3.5
+            fallback_positive = global_stat["positive"] / count if count else 0.5
+            user_stat = user_stats[rating.user_id]
+            movie_stat = movie_stats[rating.movie_id]
+            user_count, user_mean, user_positive = stat_values(user_stat, fallback_mean, fallback_positive)
+            movie_count, movie_mean, movie_positive = stat_values(movie_stat, fallback_mean, fallback_positive)
+            user = dataset.users[rating.user_id]
+            matrix[index] = [float(user["gender"] == "M"), user["age"] / 56.0,
+                             user["occupation"] / 20.0, user_count, user_mean / 5.0,
+                             user_positive, movie_count, movie_mean / 5.0, movie_positive,
+                             *movie_genres[rating.movie_id]]
+            positive = rating.rating >= 4
+            target[index] = positive
+            for stat in (user_stat, movie_stat, global_stat):
+                stat["count"] += 1
+                stat["sum"] += rating.rating
+                stat["positive"] += positive
+        if split == "train":
+            # 在线推理固定使用 T1 时的统计，后续评分只影响离线特征。
+            state["users"] = {str(key): value.copy() for key, value in user_stats.items()}
+            state["movies"] = {str(key): value.copy() for key, value in movie_stats.items()}
+            state["global"] = global_stat.copy()
     return matrices, targets, state
 
 

@@ -117,9 +117,9 @@ export const App = () => {
       setSavingWorkspace(false)
     }
   }
-  async function select(session: Session) {
+  async function select(session: Session, request?: number) {
     if (busy) return
-    const request = ++selection.current
+    request ??= ++selection.current
     setLoadingSession(true)
     try {
       const data = await api(`/api/sessions/${encodeURIComponent(session.id)}`)
@@ -150,23 +150,26 @@ export const App = () => {
     }
   }
   useEffect(() => {
-    if (!remoteRun || !current) return
+    if (!remoteRun || !current || loadingSession) return
     const session = current
     const request = selection.current
-    const timer = window.setInterval(async () => {
+    let active = true
+    let timer: number
+    async function poll() {
       try {
         const state = await api(`/api/sessions/${encodeURIComponent(session.id)}/status`)
-        if (request !== selection.current) return
+        if (!active || request !== selection.current) return
         if (state.run_status === 'idle') {
-          window.clearInterval(timer)
-          void select(session)
+          await select(session, request)
         } else setStopping(state.run_status === 'cancelling')
       } catch {
-        window.clearInterval(timer)
+        // 请求暂时失败时，在下一次轮询重试。
       }
-    }, 1000)
-    return () => window.clearInterval(timer)
-  }, [remoteRun, current?.id])
+      if (active && request === selection.current) timer = window.setTimeout(poll, 1000)
+    }
+    timer = window.setTimeout(poll, 1000)
+    return () => { active = false; window.clearTimeout(timer) }
+  }, [remoteRun, current, loadingSession])
   async function stopRun() {
     if (!current || stopping) return
     const request = selection.current

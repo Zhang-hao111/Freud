@@ -3,12 +3,12 @@ import unittest
 from threading import Event
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from agent.llm import MockLLM
 from agent.session import SessionStore
 from agent.types import Action, AssistantMessage, ToolMessage, ToolResult, UserMessage
-from agent.web import WebAgent
+from agent.web import WebAgent, make_handler
 
 
 class WebAgentTests(unittest.TestCase):
@@ -17,6 +17,34 @@ class WebAgentTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.config = {'workspace': self.tmp.name, 'traces_dir': str(Path(self.tmp.name) / 'traces'), 'shell_timeout': 5, 'max_steps': 4, 'api_key': '', 'model': '', 'api_base': ''}
         self.store = SessionStore(Path(self.tmp.name) / 'sessions')
+
+    def test_session_detail_keeps_polling_if_run_finishes_during_history_read(self):
+        app = WebAgent(self.config, self.store)
+        conversations = app.conversations
+        session = conversations.new_session()
+        session_id = session.data['id']
+
+        def load_then_finish(key):
+            snapshot = self.store.get(key)
+            session.save([AssistantMessage(content='任务结果', workflow=True)])
+            conversations.active.pop(key)
+            return snapshot
+
+        handler_type = make_handler(app)
+        handler = handler_type.__new__(handler_type)
+        handler.path = f'/api/sessions/{session_id}'
+        handler.allowed = Mock(return_value=True)
+        handler.reply = Mock()
+        conversations.active[session_id] = Event()
+        with patch.object(conversations, 'session', side_effect=load_then_finish):
+            handler.do_GET()
+        self.assertEqual(handler.reply.call_args.args[1]['run_status'], 'running')
+        self.assertEqual(handler.reply.call_args.args[1]['messages'], [])
+
+        handler.do_GET()
+        detail = handler.reply.call_args.args[1]
+        self.assertEqual(detail['run_status'], 'idle')
+        self.assertEqual(detail['messages'][0]['content'], '任务结果')
 
     def test_rejected_write_is_fed_back_and_conversation_can_continue(self):
         target = Path(self.tmp.name) / 'example.txt'
