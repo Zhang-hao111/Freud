@@ -93,7 +93,9 @@ class Workflows:
         return None
 
     def clear_context(self, session):
-        session.data.setdefault('workflows', {})['followup_context'] = None
+        state = session.data.setdefault('workflows', {})
+        state['followup_context'] = None
+        state.pop('followup_question_indices', None)
         session.save()
 
     def register_followup_commands(self, name, *commands):
@@ -148,15 +150,16 @@ class Workflows:
             if checkpoint:
                 checkpoint()
             reply = handler(session, state, text, request, progress)
-            if not followup or target != request.get('target'):
-                state['followup_context'] = ({'target': target, 'message_index': len(messages) - 1}
+            question_index = len(messages) - 1
+            previous_context = state.get('followup_context')
+            question_indices = state.get('followup_question_indices', [])
+            if not followup or not previous_context or target != previous_context.get('target'):
+                state['followup_context'] = ({'target': target, 'message_index': question_index}
                                              if plugin.followup else None)
+                question_indices = []
             use_model = plugin.result_llm is not None and reply.evidence is not None
             if followup and use_model:
-                followup_state = state.get('followup_context') or {'target': target}
-                state['followup_context'] = followup_state
-                start = followup_state.setdefault('message_index', len(messages) - 1)
-                recent = [m.content[:500] for m in messages[start:-1] if isinstance(m, UserMessage)][-4:]
+                recent = [messages[index].content[:500] for index in question_indices]
                 send({'type': 'progress', 'content': '正在根据登记结果回答'})
                 try:
                     if checkpoint:
@@ -169,6 +172,11 @@ class Workflows:
                     raise
                 except Exception:
                     reply.content = '模型暂不可用，以下为登记结果。\n\n' + reply.content
+            # 只登记已完成、属于当前结果的请求。原文仍取自已保存的消息。
+            if state['followup_context']:
+                state['followup_question_indices'] = [*question_indices[-3:], question_index]
+            else:
+                state.pop('followup_question_indices', None)
             message = AssistantMessage(content=reply.content, workflow=True)
             session.data['workflows'] = state
             messages.append(message)

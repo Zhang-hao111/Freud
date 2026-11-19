@@ -103,11 +103,13 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.session.data['workflows']['followup_context']['target'], 'analysis')
 
     def test_clear_followup_context_preserves_results(self):
-        self.session.data['workflows'] = {'followup_context': {'target': 'analysis'}, 'analysis_job': {'task': 'reduction'}}
+        self.session.data['workflows'] = {'followup_context': {'target': 'analysis'},
+                                          'followup_question_indices': [1], 'analysis_job': {'task': 'reduction'}}
         self.session.save()
         self.app.conversations.clear_followup(self.session.data['id'])
         restored = self.app.conversations.session(self.session.data['id'])
         self.assertIsNone(restored.data['workflows']['followup_context'])
+        self.assertNotIn('followup_question_indices', restored.data['workflows'])
         self.assertIn('analysis_job', restored.data['workflows'])
 
     def test_cleared_followup_context_is_not_reused_from_an_old_snapshot(self):
@@ -188,6 +190,11 @@ class WorkflowTests(unittest.TestCase):
 
         self.session = self.store.list()[0]
         self.assertEqual(self.session.messages[-1].content, update['content'])
+        self.session.save([*self.session.messages, UserMessage(content='CLI 普通编程请求'),
+                           UserMessage(content='CLI 内部工具反馈', internal=True)])
+        failed = self.run_flow('training', '另一次失败的训练请求', iteration1_id='invalid')
+        self.assertEqual(failed[-1]['type'], 'error')
+        self.session = self.store.get(self.session.data['id'])
         events = self.run_flow('followup', '这些概率代表真实评分吗？', target='analysis')
         self.assertIn('这是预测概率。', events[-1]['content'])
         prompt = json.loads(provider.complete_text.call_args.args[0][-1].content)
@@ -197,6 +204,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(events[-1]['type'], 'assistant')
         self.assertIn('模型暂不可用', events[-1]['content'])
         self.assertIn('| 逻辑回归 | 测试期 |', events[-1]['content'])
+        prompt = json.loads(provider.complete_text.call_args.args[0][-1].content)
+        self.assertEqual(prompt['recent_questions'], ['分类预测', '这些概率代表真实评分吗？'])
 
     def test_reduction_followup_gives_llm_the_metric_limits(self):
         self.run_flow('training', '训练', iteration1_id=self.task_id)
