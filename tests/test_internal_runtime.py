@@ -133,13 +133,17 @@ class PersistenceTests(unittest.TestCase):
             stale = store.get(session.data['id'])
             session.save([UserMessage(content='Web 回合')])
             fresh_messages = []
+            verified = Mock()
 
             def run_loop(messages, *_args, **_kwargs):
                 fresh_messages.extend(messages)
+                self.assertEqual(app.conversations.run_status(session.data['id']), 'external')
+                self.assertFalse(app.conversations.cancel(session.data['id']))
                 with self.assertRaisesRegex(SessionConflict, '正在运行'):
                     app.conversations.delete_session(session.data['id'])
                 with self.assertRaisesRegex(SessionConflict, '正在运行'):
                     app.chat(session, '并发 Web 回合', Mock())
+                verified()
                 return True
 
             runtime = {key: app.runtime[key] for key in ('sessions', 'models', 'tracer', 'tools')}
@@ -151,8 +155,10 @@ class PersistenceTests(unittest.TestCase):
                  patch.object(cli.term, 'read_line', side_effect=['CLI 回合', EOFError]):
                 cli.repl(mock=True, resume=True)
 
+            verified.assert_called_once_with()
             self.assertEqual([m.content for m in fresh_messages], ['Web 回合', 'CLI 回合'])
             self.assertEqual(store.get(session.data['id']).messages, fresh_messages)
+            self.assertEqual(app.conversations.run_status(session.data['id']), 'idle')
 
     def test_stale_writer_cannot_overwrite_or_recreate_session(self):
         with tempfile.TemporaryDirectory() as root:

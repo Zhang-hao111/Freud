@@ -10,9 +10,11 @@ import './freud.css'
 type Workspace = { id: string; title: string; path: string }
 type Session = { id: string; title: string; workspace_id: string | null }
 type Item = { type: string; content?: string; tool?: string; args?: Record<string, unknown>; id?: string; reason?: string; workflow_result?: boolean }
+type FollowupContext = { target: string; message_index?: number }
+type RunStatus = 'idle' | 'running' | 'cancelling' | 'external'
 type SessionDetail = Session & {
-  run_status: 'idle' | 'running' | 'cancelling'
-  followup_context?: { target: string } | null
+  run_status: RunStatus
+  followup_context?: FollowupContext | null
   messages: {
     role: string
     content: string | null
@@ -66,12 +68,12 @@ export const App = () => {
   const theme = useTheme()
   const menuRef = useRef<HTMLDivElement>(null)
   const [permissionMode, setPermissionMode] = useState('ask')
-  const [followupTarget, setFollowupTarget] = useState<string | null>(null)
+  const [followupContext, setFollowupContext] = useState<FollowupContext | null>(null)
   const [tasks, setTasks] = useState<WorkflowTask[]>([])
   const [fieldValues, setFieldValues] = useState<Record<string, string>>({})
   const [optionsText, setOptionsText] = useState('')
   const [busy, setBusy] = useState(false)
-  const [remoteRun, setRemoteRun] = useState(false)
+  const [remoteStatus, setRemoteStatus] = useState<RunStatus>('idle')
   const [stopping, setStopping] = useState(false)
   const [loadingSession, setLoadingSession] = useState(false)
   const [error, setError] = useState('')
@@ -79,7 +81,9 @@ export const App = () => {
   const selection = useRef(0)
   const lastItem = items.at(-1)
   const selectedTask = tasks.find(task => task.id === mode)
+  const remoteRun = remoteStatus !== 'idle'
   const running = busy || remoteRun
+  const followupTarget = followupContext?.target
   const followupLabel = tasks.find(task => task.id === followupTarget)?.result_label || '结果'
   const workspace = workspaces.find(row => row.id === (current ? current.workspace_id : workspaceId))
   const groups = [...workspaces, ...(sessions.some(session => session.workspace_id === null) ? [{ id: null, title: '未分组', path: '' }] : [])]
@@ -110,9 +114,9 @@ export const App = () => {
   }
   function newSession(next = workspaceId) {
     selection.current++
-    setRemoteRun(false); setStopping(false)
+    setRemoteStatus('idle'); setStopping(false)
     setLoadingSession(false)
-    setWorkspaceId(next); setCurrent(null); setItems([]); setDraft(''); chooseMode('chat'); setPermissionMode('ask'); setFollowupTarget(null); setError(''); setSidebarOpen(false)
+    setWorkspaceId(next); setCurrent(null); setItems([]); setDraft(''); chooseMode('chat'); setPermissionMode('ask'); setFollowupContext(null); setError(''); setSidebarOpen(false)
   }
   async function addWorkspace(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -152,9 +156,9 @@ export const App = () => {
     }
     setCurrent({ id: data.id, title: data.title, workspace_id: data.workspace_id })
     setItems(history)
-    setRemoteRun(data.run_status === 'running' || data.run_status === 'cancelling')
+    setRemoteStatus(data.run_status)
     setStopping(data.run_status === 'cancelling')
-    setFollowupTarget(data.followup_context?.target || null)
+    setFollowupContext(data.followup_context ?? null)
     if (data.workspace_id) setWorkspaceId(data.workspace_id)
   }
   async function select(session: Session, request?: number) {
@@ -187,7 +191,10 @@ export const App = () => {
         if (!active || request !== selection.current) return
         if (state.run_status === 'idle') {
           await select(session, request)
-        } else setStopping(state.run_status === 'cancelling')
+        } else {
+          setRemoteStatus(state.run_status)
+          setStopping(state.run_status === 'cancelling')
+        }
       } catch {
         // 请求暂时失败时，在下一次轮询重试。
       }
@@ -197,7 +204,7 @@ export const App = () => {
     return () => { active = false; window.clearTimeout(timer) }
   }, [remoteRun, current, loadingSession, busy])
   async function stopRun() {
-    if (!current || stopping) return
+    if (!current || stopping || remoteStatus === 'external') return
     const request = selection.current
     setStopping(true)
     try {
@@ -219,10 +226,12 @@ export const App = () => {
       const session: Session = current || await api('/api/sessions', { workspace_id: workspaceId })
       setCurrent(session)
       setItems(old => [...old, { type: 'user', content: text }])
-      const request = { ...taskPayload, session_id: session.id, text, mode, permission_mode: permissionMode, followup: mode === 'chat' && !!followupTarget }
+      const context = mode === 'chat' ? followupContext : null
+      const request = { ...taskPayload, session_id: session.id, text, mode, permission_mode: permissionMode,
+        followup: context !== null, followup_context: context }
       const response = await fetch(mode === 'chat' ? '/api/chat' : '/api/workflow', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request) })
       if (response.status === 409) {
-        setDraft(draft)
+        setDraft(next => next ? `${draft}\n\n${next}` : draft)
         setItems(old => old.slice(0, -1))
         const rejected = await response.json()
         setError(rejected.error || '该会话正在运行')
@@ -256,13 +265,16 @@ export const App = () => {
     } catch (e) { setError(String(e)); setStopping(false) } finally { setBusy(false) }
   }
   async function endFollowup() {
-    if (!current || running || loadingSession) return
+    if (!current || running || loadingSession || !followupContext) return
     const request = selection.current
+    const sessionPath = `/api/sessions/${encodeURIComponent(current.id)}`
     try {
-      await api(`/api/sessions/${encodeURIComponent(current.id)}/end-context`, {})
-      if (request === selection.current) setFollowupTarget(null)
+      await api(`${sessionPath}/end-context`, { followup_context: followupContext })
+      if (request === selection.current) setFollowupContext(null)
     } catch (e) {
       if (request === selection.current) setError(String(e))
+      const updated = await api(sessionPath).catch(() => null)
+      if (updated && request === selection.current) applySession(updated)
     }
   }
   async function removeSession(session: Session) {
@@ -314,7 +326,7 @@ export const App = () => {
       </div></header>
       <div className="feed" ref={feed} aria-busy={busy || loadingSession}><div className="conversation-column content">{!current && !items.length && !loadingSession && !error && <div className="welcome"><h1>有什么可以帮你？</h1></div>}
         {items.map((item, index) => item.type === 'user' ? <div key={index} className="bubble">{item.content}</div> : item.type === 'assistant' ? <AssistantReply key={index} content={item.content || ''} workflowResult={item.workflow_result} /> : item.type === 'tool' ? <details key={index} className="tool"><summary>{item.tool}</summary><pre>{JSON.stringify(item.args, null, 2)}</pre></details> : item.type === 'result' ? <details key={index} className="result"><summary>工具结果</summary><pre>{item.content}</pre></details> : item.type === 'approval' ? <div key={index} className="approval"><strong>需要你的确认</strong><p>{item.reason}</p><pre>{item.tool} {JSON.stringify(item.args, null, 2)}</pre><button onClick={() => void approve(item, true)}>允许执行</button><button onClick={() => void approve(item, false)}>拒绝</button></div> : <div key={index} className="process-update">{item.content}</div>)}
-        {(running || loadingSession) && <p className="status" role="status">{loadingSession ? '正在打开对话…' : stopping ? '等待任务停止…' : '正在处理…'}</p>}{error && <p className="error" role="alert">{error}</p>}</div></div>
+        {(running || loadingSession) && <p className="status" role="status">{loadingSession ? '正在打开对话…' : remoteStatus === 'external' ? '此会话正在另一处运行…' : stopping ? '等待任务停止…' : '正在处理…'}</p>}{error && <p className="error" role="alert">{error}</p>}</div></div>
       <div className="conversation-column composer-wrap">
         <div className="composer-context"><div className="composer-workspace">
           <span className="folder-icon" aria-hidden="true" />
@@ -340,7 +352,7 @@ export const App = () => {
         </div>
         <div className="composer-actions">
           <select className="permission-mode" aria-label="权限模式" value={permissionMode} disabled={busy || loadingSession} onChange={e => setPermissionMode(e.target.value)}><option value="ask">询问确认</option><option value="accept">自动允许编辑</option><option value="yolo">自动批准（危险）</option></select>
-          {running && current ? <button className="send" disabled={stopping} onClick={() => void stopRun()} aria-label="停止任务" title="停止任务">■</button>
+          {running && current && remoteStatus !== 'external' ? <button className="send" disabled={stopping} onClick={() => void stopRun()} aria-label="停止任务" title="停止任务">■</button>
             : <button className="send" disabled={running || savingWorkspace || loadingSession || !draft.trim()} onClick={() => void send()} aria-label="发送">↑</button>}
         </div></div>
       </div>{mode === 'chat' && followupTarget && <div className="hint">正在基于最近的{followupLabel}继续对话 <button className="end-context" disabled={busy || loadingSession} onClick={() => void endFollowup()}>结束结果上下文</button></div>}</div>

@@ -185,8 +185,11 @@ def make_handler(app):
                 return self.reply(409, {'error': '当前没有运行中的任务'})
             match = re.fullmatch(r'/api/sessions/([^/]+)/end-context', self.path)
             if match:
+                expected_context = data.get('followup_context')
+                if not isinstance(expected_context, dict):
+                    return self.reply(409, {'error': '请重新打开会话以确认结果上下文。'})
                 try:
-                    conversations.clear_followup(match.group(1))
+                    conversations.clear_followup(match.group(1), expected_context=expected_context)
                     return self.reply(200, {})
                 except ValueError as exc:
                     return self.reply(409, {'error': str(exc)})
@@ -199,6 +202,10 @@ def make_handler(app):
                 text = data.get('text')
                 if not session or not isinstance(text, str) or not text.strip():
                     return self.reply(400, {'error': '会话或消息无效'})
+                followup = self.path == '/api/chat' and data.get('followup') is True
+                expected_context = data.get('followup_context') if followup else None
+                if followup and not isinstance(expected_context, dict):
+                    return self.reply(409, {'error': '请重新打开会话以确认结果上下文。'})
                 streaming = False
                 def start_stream():
                     nonlocal streaming
@@ -218,7 +225,7 @@ def make_handler(app):
                     self.wfile.flush()
                 try:
                     if self.path == '/api/chat':
-                        app.chat(session, text.strip(), emit, followup=data.get('followup') is True,
+                        app.chat(session, text.strip(), emit, followup=followup, expected_context=expected_context,
                                  permission_mode=data.get('permission_mode', 'ask'), heartbeat=heartbeat)
                     else:
                         conversations.run_workflow(session, text.strip(), data, emit)

@@ -38,6 +38,14 @@ def _write_lock(directory):
         os.close(fd)
 
 
+def _turn_lock_path(directory, session_id):
+    return directory / '.turn-locks' / f'session-{session_id}'
+
+
+def _valid_session_id(session_id):
+    return isinstance(session_id, str) and '/' not in session_id and '\\' not in session_id
+
+
 def _write_json(path, data):
     fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=f'.{path.name}.')
     try:
@@ -223,10 +231,10 @@ class Session:
     @contextmanager
     def turn(self):
         """让 CLI 和 Web 在同一会话内串行执行和保存回合。"""
-        directory = self.path.parent / '.turn-locks'
-        directory.mkdir(mode=0o700, exist_ok=True)
+        lock = _turn_lock_path(self.path.parent, self.data['id'])
+        lock.parent.mkdir(mode=0o700, exist_ok=True)
         # 会话 JSON 会原子替换。锁文件单独存放，不删除，以免并发打开不同的 inode。
-        fd = os.open(directory / self.path.stem, os.O_CREAT | os.O_RDONLY, 0o600)
+        fd = os.open(lock, os.O_CREAT | os.O_RDONLY, 0o600)
         try:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -263,7 +271,7 @@ class Session:
     @classmethod
     def from_path(cls, path: Path) -> 'Session':
         data = json.loads(path.read_text(encoding='utf-8'))
-        if not isinstance(data, dict) or not isinstance(data.get('id'), str):
+        if not isinstance(data, dict) or not _valid_session_id(data.get('id')):
             raise ValueError('会话文件格式无效')
         return cls(path, data=data)
 
@@ -281,6 +289,21 @@ class SessionStore:
         session.path = self.dir / f"session-{session.data['id']}.json"
         session.save()
         return session
+
+    def has_active_turn(self, session_id):
+        if not _valid_session_id(session_id):
+            return False
+        try:
+            fd = os.open(_turn_lock_path(self.dir, session_id), os.O_RDONLY)
+        except FileNotFoundError:
+            return False
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            return False
+        except BlockingIOError:
+            return True
+        finally:
+            os.close(fd)
 
     def delete(self, session: Session):
         with session.turn(), _write_lock(self.dir):
@@ -308,7 +331,7 @@ class SessionStore:
             yield path, summary
 
     def get(self, session_id):
-        if not isinstance(session_id, str) or '/' in session_id or '\\' in session_id:
+        if not _valid_session_id(session_id):
             return None
         try:
             session = Session.from_path(self.dir / f'session-{session_id}.json')

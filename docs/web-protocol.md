@@ -4,6 +4,8 @@
 
 会话冲突拒绝新回合时，接口在开启事件流前返回 HTTP 409 与 JSON 错误。客户端保留用户的草稿，并重新读取会话。
 
+`POST /api/chat` 的结果追问请求携带 `followup: true` 和会话详情返回的 `followup_context`。结束结果上下文的请求也携带 `followup_context`。结果上下文已被其他入口替换时，这两个操作返回 HTTP 409。
+
 | type | 字段 | 用途 |
 | --- | --- | --- |
 | `progress` | `content: string` | 工作流执行进度 |
@@ -14,6 +16,6 @@
 | `approval` | `id: string`，`tool: string`，`args: object`，`reason: string` | 请求用户批准，使用 `/api/approve` 回应 |
 | `error` | `content: string` | 本回合错误 |
 
-`GET /api/sessions/{id}/status` 返回运行状态 `idle`、`running` 或 `cancelling`。发送 `POST /api/sessions/{id}/cancel` 请求停止当前回合。已有结果保留，尚未完成的任务会在下一个安全阶段停止。
+`GET /api/sessions/{id}/status` 返回运行状态 `idle`、`running`、`cancelling` 或 `external`。`external` 表示另一进程正在操作该会话，当前服务只轮询状态。发送 `POST /api/sessions/{id}/cancel` 请求停止当前服务中的回合。已有结果保留，尚未完成的任务会在下一个安全阶段停止。
 
 任务目录由 `GET /api/workflows` 返回，每个任务声明文本、字段和高级参数；具体请求按字段的 `location` 放在请求顶层或 `options` 中。训练与分析结果当前以 Markdown 返回，报告和图表通过工作流产物接口读取。修改协议时需要同步 Python、TypeScript 和本文档。

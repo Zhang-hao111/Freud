@@ -6,7 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch, Mock
 
-from agent.session import SessionStore
+from agent.session import SessionConflict, SessionStore
 import agent.session as session_module
 from movielens_plugin.task_llm import TaskLLM
 from agent.types import UserMessage
@@ -118,6 +118,26 @@ class WorkflowTests(unittest.TestCase):
         self.app.conversations.chat(self.session, '现在走普通对话', events.append, followup=True)
         self.assertIn('未设置 API Key', events[-1]['content'])
         self.assertIsNone(self.flows.context(self.session))
+
+    def test_followup_is_bound_to_the_displayed_workflow_result(self):
+        stale_context = {'target': 'analysis', 'message_index': 1}
+        current_context = {'target': 'analysis', 'message_index': 4}
+        self.session.data['workflows'] = {'followup_context': stale_context}
+        self.session.save()
+        stale = self.store.get(self.session.data['id'])
+        self.session.data['workflows']['followup_context'] = current_context
+        self.session.save()
+
+        conversations = self.app.conversations
+        emit = Mock()
+        with self.assertRaisesRegex(SessionConflict, '结果上下文已更新'):
+            conversations.chat(stale, '继续旧结果', emit, followup=True, expected_context=stale_context)
+        with self.assertRaisesRegex(SessionConflict, '结果上下文已更新'):
+            conversations.clear_followup(stale.data['id'], expected_context=stale_context)
+
+        emit.assert_not_called()
+        self.assertEqual(self.store.get(stale.data['id']).messages, [])
+        self.assertEqual(self.flows.context(self.store.get(stale.data['id'])), current_context)
 
     def test_governance_plugin_uses_actual_completed_job(self):
         report = test_governance.GovernanceWorkerTests.report()

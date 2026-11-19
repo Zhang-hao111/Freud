@@ -49,7 +49,13 @@ class Conversations:
     def workspace_ids(self):
         return {row['path']: row['id'] for row in self.workspaces.list()}
 
-    def clear_followup(self, session_id):
+    def _followup_context(self, session, expected_context):
+        context = self.workflows.context(session)
+        if expected_context is not None and context != expected_context:
+            raise SessionConflict('结果上下文已更新，请确认当前结果后重试。')
+        return context
+
+    def clear_followup(self, session_id, *, expected_context=None):
         with self.lock:
             if session_id in self.active:
                 raise ValueError('该会话正在运行')
@@ -57,6 +63,7 @@ class Conversations:
             if not session:
                 raise ValueError('会话不存在')
             with session.turn():
+                self._followup_context(session, expected_context)
                 self.workflows.clear_context(session)
 
     def delete_session(self, session_id):
@@ -82,11 +89,15 @@ class Conversations:
     def run_status(self, session_id):
         with self.lock:
             event = self.active.get(session_id)
-            return 'idle' if event is None else 'cancelling' if event.is_set() else 'running'
+            if event is not None:
+                return 'cancelling' if event.is_set() else 'running'
+        return 'external' if self.store.has_active_turn(session_id) else 'idle'
 
     def checkpoint(self, session_id):
-        if self.run_status(session_id) == 'cancelling':
-            raise RunCancelled('任务已取消')
+        with self.lock:
+            event = self.active.get(session_id)
+            if event is not None and event.is_set():
+                raise RunCancelled('任务已取消')
 
     @contextmanager
     def _session_turn(self, session):
@@ -112,14 +123,15 @@ class Conversations:
         with self._session_turn(session):
             self.workflows.run(session, text, request, emit, checkpoint=lambda: self.checkpoint(session.data['id']))
 
-    def chat(self, session, text, emit: Emit, followup=False, permission_mode='ask', *, approve=None):
+    def chat(self, session, text, emit: Emit, followup=False, permission_mode='ask', *,
+             approve=None, expected_context=None):
         if permission_mode not in MODES:
             raise ValueError('权限模式无效')
         with self._session_turn(session) as workspace:
             def checkpoint():
                 self.checkpoint(session.data['id'])
 
-            context = self.workflows.context(session) if followup else None
+            context = self._followup_context(session, expected_context) if followup else None
             if context:
                 self.workflows.run(session, text, {'mode': 'followup', 'target': context['target']}, emit,
                                    checkpoint=checkpoint)
