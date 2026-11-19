@@ -1,8 +1,10 @@
 """工作区文件访问和 Shell 进程隔离。"""
 
 import os
+import re
 import shutil
 import stat
+import subprocess
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -42,10 +44,21 @@ def workspace_file(workspace, raw, *, write=False):
 def sandbox_command(workspace, command):
     bwrap = shutil.which('bwrap')
     if not bwrap:
-        raise ValueError('Shell 工作区隔离需要 Bubblewrap（bwrap）')
+        raise ValueError('Shell 工作区隔离需要 Bubblewrap 0.8.0 或更新版本（bwrap）')
     root = str(Path(workspace).resolve())
     if root == '/' or root in ('/usr', '/bin', '/lib', '/lib64', '/proc', '/dev', '/etc', '/tmp'):
         raise ValueError('请选择具体项目目录作为 Shell 工作区')
+    try:
+        version = subprocess.run([bwrap, '--version'], capture_output=True, text=True,
+                                 check=True, timeout=2).stdout
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError('无法读取 Bubblewrap 版本，请检查 bwrap 安装') from exc
+    detected = re.search(r'\bbubblewrap (\d+)\.(\d+)\.(\d+)\b', version)
+    if not detected:
+        raise ValueError('无法识别 Bubblewrap 版本，请检查 bwrap 安装')
+    if tuple(map(int, detected.groups())) < (0, 8, 0):
+        current = '.'.join(detected.groups())
+        raise ValueError(f'Shell 工作区隔离需要 Bubblewrap 0.8.0 或更新版本，当前版本为 {current}')
     args = [bwrap, '--unshare-all', '--unshare-user', '--disable-userns', '--die-with-parent',
             '--clearenv', '--setenv', 'PATH', '/usr/local/bin:/usr/bin:/bin',
             '--setenv', 'LANG', 'C.UTF-8', '--setenv', 'HOME', '/tmp',

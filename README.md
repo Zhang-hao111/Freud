@@ -43,7 +43,7 @@ MovieLens 1M
 
 - Linux、Python 3.11 或更新版本，以及 [uv](https://docs.astral.sh/uv/)
 - 从源码构建网页需要 Node.js 22.12 或更新版本及 pnpm
-- 普通 Agent 的 Shell 工具需要 Bubblewrap（`bwrap`）及可用的 Linux 用户命名空间
+- 普通 Agent 的 Shell 工具需要 Bubblewrap（`bwrap`）0.8.0 或更新版本，以及可用的非特权 Linux 用户命名空间。可用 `bwrap --version` 检查。Ubuntu 22.04 默认仓库的 0.6.1 需要升级才可使用 Shell 工具
 - MovieLens 课程任务需要 Hadoop 3、Hadoop Streaming jar、工作节点上的 Python 3，以及三个原始数据文件
 - 普通对话需要兼容 OpenAI Chat Completions API 的模型服务。课程任务可以独立运行，配置模型后还可解读结果和继续追问
 

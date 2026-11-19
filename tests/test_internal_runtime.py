@@ -208,6 +208,19 @@ class PersistenceTests(unittest.TestCase):
 
 
 class ExecutionBoundaryTests(unittest.TestCase):
+    def test_shell_explains_unsupported_bubblewrap_before_running_command(self):
+        with tempfile.TemporaryDirectory() as root, \
+             patch('agent.execution_scope.shutil.which', return_value='/usr/bin/bwrap'), \
+             patch('subprocess.run', return_value=Mock(stdout='bubblewrap 0.6.1\n')) as version, \
+             patch.object(ShellTool, '_run') as run:
+            result = ShellTool(workspace=root).execute({'command': 'pwd'})
+
+        self.assertFalse(result.success)
+        self.assertIn('Bubblewrap 0.8.0', result.error)
+        self.assertIn('0.6.1', result.error)
+        self.assertEqual(version.call_args.args[0], ['/usr/bin/bwrap', '--version'])
+        run.assert_not_called()
+
     def test_shell_decodes_multibyte_output_before_limiting_and_preserves_tail(self):
         for count in (7_000, MAX_TOOL_OUTPUT + 1):
             with self.subTest(count=count):
