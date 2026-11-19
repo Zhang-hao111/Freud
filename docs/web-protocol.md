@@ -2,6 +2,8 @@
 
 `POST /api/chat` 和 `POST /api/workflow` 返回 UTF-8 NDJSON，客户端按发送顺序处理 JSON 事件，并忽略审批等待期间用于检测断线的空行。断线后待审批的工具不会执行，该回合会结束。字段和类型在 `agent/events.py` 与 `web/src/app/events.ts` 中声明。历史消息仍通过会话接口获取，不使用此事件格式。
 
+会话冲突拒绝新回合时，接口在开启事件流前返回 HTTP 409 与 JSON 错误。客户端保留用户的草稿，并重新读取会话。
+
 | type | 字段 | 用途 |
 | --- | --- | --- |
 | `progress` | `content: string` | 工作流执行进度 |

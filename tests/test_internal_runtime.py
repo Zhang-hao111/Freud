@@ -1,3 +1,4 @@
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,7 +8,7 @@ from agent import cli, config
 from agent.context import CONTEXT_CHARS, model_context
 from agent.core import build_chat_system_prompt, run_chat_turn
 from agent.llm import MockLLM, parse_tool_call
-from agent.registry import create_default_registry
+from agent.registry import MAX_TOOL_OUTPUT, ShellTool, create_default_registry
 from agent.session import SessionConflict, SessionMemory, SessionStore, dump_messages, load_messages
 from agent.tool_execution import execute_tool
 from agent.types import Action, AssistantMessage, LLMResponse, SystemMessage, ToolCall, ToolMessage, UserMessage
@@ -201,6 +202,18 @@ class PersistenceTests(unittest.TestCase):
 
 
 class ExecutionBoundaryTests(unittest.TestCase):
+    def test_shell_decodes_multibyte_output_before_limiting_and_preserves_tail(self):
+        for count in (7_000, MAX_TOOL_OUTPUT + 1):
+            with self.subTest(count=count):
+                script = f"print('START' + '测' * {count} + 'ERROR'); raise SystemExit(2)"
+                output, code = ShellTool()._run([sys.executable, '-c', script])
+                self.assertEqual(code, 2)
+                self.assertTrue(output.startswith('START'))
+                self.assertTrue(output.endswith('ERROR\n'))
+                self.assertLessEqual(len(output), MAX_TOOL_OUTPUT)
+                if count < MAX_TOOL_OUTPUT:
+                    self.assertEqual(output, 'START' + '测' * count + 'ERROR\n')
+
     def test_cancel_chat_preserves_receipt_and_prevents_tool_execution(self):
         with tempfile.TemporaryDirectory() as root:
             root = Path(root)

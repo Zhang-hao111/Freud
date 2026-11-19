@@ -10,6 +10,18 @@ import './freud.css'
 type Workspace = { id: string; title: string; path: string }
 type Session = { id: string; title: string; workspace_id: string | null }
 type Item = { type: string; content?: string; tool?: string; args?: Record<string, unknown>; id?: string; reason?: string; workflow_result?: boolean }
+type SessionDetail = Session & {
+  run_status: 'idle' | 'running' | 'cancelling'
+  followup_context?: { target: string } | null
+  messages: {
+    role: string
+    content: string | null
+    internal?: boolean
+    workflow?: boolean
+    tool_call_id?: string
+    tool_calls?: { id: string; function?: { name: string; arguments: string } }[]
+  }[]
+}
 
 function AssistantReply({ content, workflowResult }: { content: string; workflowResult?: boolean }) {
   const trainingMarker = '\n\n<!-- freud-training-details -->\n'
@@ -117,32 +129,46 @@ export const App = () => {
       setSavingWorkspace(false)
     }
   }
+  function applySession(data: SessionDetail) {
+    const history: Item[] = []
+    const doneCalls = new Set<string>()
+    for (const message of data.messages) {
+      if (message.role === 'user' && !message.internal) history.push({ type: 'user', content: message.content ?? '' })
+      if (message.role === 'assistant') {
+        if (message.content) history.push({ type: 'assistant', content: message.content, workflow_result: message.workflow || undefined })
+        for (const call of message.tool_calls || []) {
+          if (call.function?.name === 'done') doneCalls.add(call.id)
+          else if (call.function) {
+            let args = {}
+            try { args = JSON.parse(call.function.arguments) } catch { /* 旧会话可能含无效参数。 */ }
+            history.push({ type: 'tool', tool: call.function.name, args })
+          }
+        }
+      }
+      if (message.role === 'tool') {
+        history.push({ type: message.tool_call_id && doneCalls.has(message.tool_call_id) ? 'assistant' : 'result',
+          content: message.content ?? '' })
+      }
+    }
+    setCurrent({ id: data.id, title: data.title, workspace_id: data.workspace_id })
+    setItems(history)
+    setRemoteRun(data.run_status === 'running' || data.run_status === 'cancelling')
+    setStopping(data.run_status === 'cancelling')
+    setFollowupTarget(data.followup_context?.target || null)
+    if (data.workspace_id) setWorkspaceId(data.workspace_id)
+  }
   async function select(session: Session, request?: number) {
     if (busy) return
+    const browsing = request === undefined
     request ??= ++selection.current
     setLoadingSession(true)
     try {
       const data = await api(`/api/sessions/${encodeURIComponent(session.id)}`)
       if (request !== selection.current) return
-      setRemoteRun(data.run_status === 'running' || data.run_status === 'cancelling')
-      setStopping(data.run_status === 'cancelling')
-      const history: Item[] = []
-      const doneCalls = new Set<string>()
-      for (const message of data.messages) {
-        if (message.role === 'user' && !message.internal) history.push({ type: 'user', content: message.content })
-        if (message.role === 'assistant') {
-          if (message.content) history.push({ type: 'assistant', content: message.content, workflow_result: message.workflow || undefined })
-          for (const call of message.tool_calls || []) {
-            const name = call.function?.name
-            if (name === 'done') doneCalls.add(call.id)
-            else if (name) history.push({ type: 'tool', tool: name, args: (() => { try { return JSON.parse(call.function.arguments) } catch { return {} } })() })
-          }
-        }
-        if (message.role === 'tool') history.push({ type: doneCalls.has(message.tool_call_id) ? 'assistant' : 'result', content: message.content })
+      applySession(data)
+      if (browsing) {
+        setDraft(''); chooseMode('chat'); setPermissionMode('ask'); setError(''); setSidebarOpen(false)
       }
-      setCurrent({ id: data.id, title: data.title, workspace_id: data.workspace_id }); setItems(history)
-      if (data.workspace_id) setWorkspaceId(data.workspace_id)
-      setDraft(''); chooseMode('chat'); setPermissionMode('ask'); setFollowupTarget(data.followup_context?.target || null); setError(''); setSidebarOpen(false)
     } catch (e) {
       if (request === selection.current) setError(String(e))
     } finally {
@@ -150,7 +176,7 @@ export const App = () => {
     }
   }
   useEffect(() => {
-    if (!remoteRun || !current || loadingSession) return
+    if (!remoteRun || !current || loadingSession || busy) return
     const session = current
     const request = selection.current
     let active = true
@@ -169,7 +195,7 @@ export const App = () => {
     }
     timer = window.setTimeout(poll, 1000)
     return () => { active = false; window.clearTimeout(timer) }
-  }, [remoteRun, current, loadingSession])
+  }, [remoteRun, current, loadingSession, busy])
   async function stopRun() {
     if (!current || stopping) return
     const request = selection.current
@@ -195,6 +221,15 @@ export const App = () => {
       setItems(old => [...old, { type: 'user', content: text }])
       const request = { ...taskPayload, session_id: session.id, text, mode, permission_mode: permissionMode, followup: mode === 'chat' && !!followupTarget }
       const response = await fetch(mode === 'chat' ? '/api/chat' : '/api/workflow', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request) })
+      if (response.status === 409) {
+        setDraft(draft)
+        setItems(old => old.slice(0, -1))
+        const rejected = await response.json()
+        setError(rejected.error || '该会话正在运行')
+        applySession(await api(`/api/sessions/${encodeURIComponent(session.id)}`))
+        await refresh()
+        return
+      }
       if (!response.ok || !response.body) throw new Error('无法开始对话')
       const reader = response.body.getReader(), decoder = new TextDecoder()
       let buffer = ''
@@ -215,11 +250,10 @@ export const App = () => {
         if (done) break
       }
       const updated = await api(`/api/sessions/${encodeURIComponent(session.id)}`)
-      setCurrent({ id: session.id, title: updated.title, workspace_id: updated.workspace_id })
-      setFollowupTarget(updated.followup_context?.target || null)
+      applySession(updated)
       if (!failed && mode !== 'chat') chooseMode('chat')
       await refresh()
-    } catch (e) { setError(String(e)) } finally { setBusy(false); setStopping(false) }
+    } catch (e) { setError(String(e)); setStopping(false) } finally { setBusy(false) }
   }
   async function endFollowup() {
     if (!current || running || loadingSession) return

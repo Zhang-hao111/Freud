@@ -1,5 +1,6 @@
 """工具系统 — read_file / write_file / shell 以及 ToolRegistry。"""
 
+import codecs
 import os
 import selectors
 import signal
@@ -112,13 +113,8 @@ class ShellTool(BaseTool):
             argv = sandbox_command(self.workspace, raw) if self.workspace else ['/bin/sh', '-c', raw]
             output, code = self._run(argv)
             if code == 0:
-                return ToolResult(success=True, data=_clip(output))
-            else:
-                return ToolResult(
-                    success=False,
-                    data=_clip(output) if output else '',
-                    error=f'返回码 {code}',
-                )
+                return ToolResult(success=True, data=output)
+            return ToolResult(success=False, data=output, error=f'返回码 {code}')
         except subprocess.TimeoutExpired:
             return ToolResult(success=False, error=f'命令执行超时 ({self.timeout}s)')
         except (OSError, ValueError) as e:
@@ -126,7 +122,11 @@ class ShellTool(BaseTool):
 
     def _run(self, argv):
         deadline = time.monotonic() + self.timeout
-        output = bytearray()
+        decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
+        marker = '\n...[输出过长，中间已截断]...\n'
+        tail_chars = MAX_TOOL_OUTPUT // 5
+        head_chars = MAX_TOOL_OUTPUT - tail_chars - len(marker)
+        output = ''
         with subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                               start_new_session=True) as process, selectors.DefaultSelector() as selector:
             try:
@@ -144,11 +144,10 @@ class ShellTool(BaseTool):
                         chunk = os.read(key.fd, 65536)
                         if not chunk:
                             selector.unregister(key.fileobj)
-                        elif len(output) <= MAX_TOOL_OUTPUT:
-                            output.extend(chunk[:MAX_TOOL_OUTPUT + 1 - len(output)])
-                clipped = len(output) > MAX_TOOL_OUTPUT
-                text = output[:MAX_TOOL_OUTPUT].decode('utf-8', errors='replace')
-                return text + ('\n...[输出过长已截断]' if clipped else ''), process.returncode
+                        output += decoder.decode(chunk, final=not chunk)
+                        if len(output) > MAX_TOOL_OUTPUT:
+                            output = output[:head_chars] + marker + output[-tail_chars:]
+                return output, process.returncode
             except BaseException:
                 # 终止管道内可能继续持有 stdout 的子进程。
                 try:

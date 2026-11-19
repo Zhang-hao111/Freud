@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from io import BytesIO
 from threading import Event
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -193,6 +194,29 @@ class WebAgentTests(unittest.TestCase):
         app.conversations.active[session.data['id']] = Event()
         with self.assertRaises(ValueError):
             app.chat(session, '测试', lambda event: None)
+
+    def test_conflicting_chat_returns_409_before_streaming(self):
+        app = WebAgent(self.config, self.store, mock=True)
+        session = app.conversations.new_session()
+        body = ('{"session_id": "%s", "text": "retry later"}' % session.data['id']).encode()
+        handler_type = make_handler(app)
+        handler = handler_type.__new__(handler_type)
+        handler.path = '/api/chat'
+        handler.headers = {'Content-Type': 'application/json', 'Content-Length': str(len(body))}
+        handler.rfile = BytesIO(body)
+        handler.allowed = Mock(return_value=True)
+        handler.reply = Mock()
+        handler.send_response = Mock()
+        handler.send_header = Mock()
+        handler.end_headers = Mock()
+        handler.wfile = BytesIO()
+
+        with session.turn():
+            handler.do_POST()
+
+        handler.send_response.assert_not_called()
+        self.assertEqual(handler.reply.call_args.args[0], 409)
+        self.assertEqual(self.store.get(session.data['id']).messages, [])
 
     def test_workspace_persists_and_concurrent_tools_use_each_session_directory(self):
         root = Path(self.tmp.name)

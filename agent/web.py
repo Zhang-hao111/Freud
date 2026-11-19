@@ -16,7 +16,7 @@ from agent.config import load_config
 from agent.conversations import install_conversations
 from agent.plugins import install_plugins
 from agent.runtime import default_runtime, install_workflows
-from agent.session import dump_messages
+from agent.session import SessionConflict, dump_messages
 from agent.workspaces import install_workspaces
 
 DIST = Path(__file__).resolve().with_name('web_dist')
@@ -199,11 +199,17 @@ def make_handler(app):
                 text = data.get('text')
                 if not session or not isinstance(text, str) or not text.strip():
                     return self.reply(400, {'error': '会话或消息无效'})
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/x-ndjson; charset=utf-8')
-                self.send_header('Cache-Control', 'no-store')
-                self.end_headers()
+                streaming = False
+                def start_stream():
+                    nonlocal streaming
+                    if not streaming:
+                        self.send_response(200)
+                        self.send_header('Content-Type', 'application/x-ndjson; charset=utf-8')
+                        self.send_header('Cache-Control', 'no-store')
+                        self.end_headers()
+                        streaming = True
                 def emit(event):
+                    start_stream()
                     self.wfile.write((json.dumps(event, ensure_ascii=False) + '\n').encode())
                     self.wfile.flush()
                 def heartbeat():
@@ -216,6 +222,11 @@ def make_handler(app):
                                  permission_mode=data.get('permission_mode', 'ask'), heartbeat=heartbeat)
                     else:
                         conversations.run_workflow(session, text.strip(), data, emit)
+                    start_stream()
+                except SessionConflict as exc:
+                    if not streaming:
+                        return self.reply(409, {'error': str(exc)})
+                    emit({'type': 'error', 'content': str(exc)})
                 except ValueError as exc:
                     emit({'type': 'error', 'content': str(exc)})
                 except (BrokenPipeError, ConnectionResetError):

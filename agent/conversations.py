@@ -8,7 +8,7 @@ from agent.core import build_chat_system_prompt
 from agent.events import Emit, RunCancelled
 from agent.llm import MockLLM
 from agent.permissions import MODES
-from agent.session import SessionMemory
+from agent.session import SessionConflict, SessionMemory
 from agent.tool_execution import record_tool_reply
 from agent.tracer import Tracer
 from agent.types import Action, AssistantMessage, SystemMessage, UserMessage
@@ -94,7 +94,7 @@ class Conversations:
         with session.turn():
             with self.lock:
                 if session_id in self.active:
-                    raise ValueError('该会话正在运行')
+                    raise SessionConflict('该会话正在运行')
                 directory = self.workspaces.session_directory(session)
                 if not directory.is_dir() or str(directory) not in self.workspace_ids():
                     raise ValueError('请先添加此对话所在的工作区，并确认目录仍然存在。')
