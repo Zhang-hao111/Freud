@@ -60,6 +60,17 @@ ml-1m/ml-1m/
 
 ## 安装与启动
 
+### 只使用 CLI
+
+在项目根目录安装 `freud`，然后用 Mock 模式检查入口。
+
+```bash
+uv tool install .
+freud --mock
+```
+
+配置模型后，运行 `freud` 进入交互模式，或用 `freud --file task.md` 执行任务文件。在源码目录开发时，对应入口为 `uv run freud`。
+
 ### 从源码启动课程网页
 
 在项目根目录安装 Agent 和 MovieLens 插件，再构建网页。
@@ -96,7 +107,7 @@ export HADOOP_STREAMING_JAR=/path/to/hadoop-streaming-3.x.x.jar
 uv run --extra movielens freud-web
 ```
 
-访问 `http://127.0.0.1:8875/`，输入框下方的「数据任务」菜单应显示清洗、训练和查询三个入口。只使用通用 Agent 时，运行 `uv sync` 安装核心包，再用 `uv run freud-web` 启动已构建的网页。修改前端后运行 `pnpm build` 并刷新页面。切换插件或修改 Python 后端后，重启 `freud-web`。
+访问 `http://127.0.0.1:8875/`，输入框下方的「数据任务」菜单应显示清洗、训练和查询三个入口。只使用通用 Agent 网页时，可用 `uv sync` 安装核心包，构建前端后运行 `uv run freud-web`。若要在配置模型和 Hadoop 前验证网页交互，可运行 `uv run freud-web --mock`。Mock 模式提供模拟对话，数据任务需要正式模式。
 
 ### 构建和安装 wheel
 
@@ -115,7 +126,7 @@ uv pip install ./coding_agent-*.whl ./freud_movielens-*.whl
 .venv/bin/freud-web
 ```
 
-按以上步骤构建的 Agent wheel 包含静态网页资源，安装后可以在任意工作目录开启网页。只使用 CLI 时，可从干净的源码目录执行 `uv tool install .`。运行课程任务前，仍需准备 MovieLens 数据并配置 Hadoop。
+按以上步骤构建的 Agent wheel 包含静态网页资源，安装后可以在任意工作目录开启网页。运行课程任务前，仍需准备 MovieLens 数据并配置 Hadoop。
 
 ## 网页交互
 
@@ -135,7 +146,15 @@ uv pip install ./coding_agent-*.whl ./freud_movielens-*.whl
 
 网页支持添加项目工作区、新建与删除对话，以及切换工具审批模式。文件工具限定在会话所在工作区，Shell 使用 Bubblewrap 隔离，能写入工作区和沙箱临时目录并读取基础系统工具。Shell 不继承启动进程的环境凭据，也无法访问外部网络。询问确认模式会对写文件和 Shell 分别请求确认。自动批准模式仍使用相同的工作区隔离。
 
-任务运行时可点击发送区的停止按钮。Shell 可终止正在运行的子进程，模型请求结束后停止后续步骤，Hadoop 和机器学习任务在下一个阶段边界停止。关闭网页后，数据任务可继续执行，重新打开该会话可以查看状态或请求停止。
+CLI 的 `/resume` 和网页共用会话。每个会话同时只执行一个回合。网页遇到并发冲突时会保留草稿并刷新历史，等正在运行的回合结束后可以重试。如果结果被另一标签页更新，网页会刷新结果并保留待追问的问题，由用户确认后重新发送。
+
+网页可停止由当前服务启动的回合。Shell 子进程可被终止，模型请求结束后会停止后续步骤，Hadoop 和机器学习任务会在下一个阶段边界检查停止请求。关闭网页后，数据任务可继续执行，重开会话可以查看状态。工具停在待审批阶段时，原连接断开会结束该回合。
+
+## 会话与模型上下文
+
+普通聊天按约 48,000 字符的预算组装模型请求，优先保留当前用户的完整任务和最近一组工具调用及回执，再纳入相关笔记和近期历史。组装请求时从较长的回执中保留开头与末尾诊断，完整会话记录仍可用于查阅。当前任务或完整工具调用组无法装入预算时，本轮会给出明确提示。
+
+MovieLens 结果解读使用已登记的结果证据，以及与这份结果关联的近期请求。普通聊天使用独立的上下文，课程报告和图表仍可在会话历史中打开。
 
 ## 结果与数据目录
 
@@ -150,7 +169,7 @@ analysis-runs/latest.json    最近一次成功的迭代二训练登记
 ~/.agent-harness/traces/     Agent 执行轨迹
 ```
 
-普通聊天按字符预算选取近期消息和当前会话的笔记。当前任务的输入完整保留，超出预算时会提示拆分任务。MovieLens 追问使用当前任务证据，新产生的报告保留在会话记录中，并与普通模型上下文分开。查询原始 JSON 可通过结果中的链接下载。删除会话同时清理该会话的查询附件和关联 trace。共享的清洗和训练产物仍可供其他会话使用。旧版未关联会话的 trace 需要单独清理。
+查询原始 JSON 可通过结果中的链接下载。删除会话同时清理该会话的查询附件和关联 trace。共享的清洗和训练产物仍可供其他会话使用。旧版未关联会话的 trace 需要单独清理。
 
 网页中迭代二查询优先使用当前对话的训练结果，也可读取 `analysis-runs/latest.json` 指向的结果。使用当前清洗上下文时会核对对应版本与时间边界。Hadoop 默认文件系统为本地文件系统时，网页使用本机临时目录存放中间文件；使用 HDFS 时默认根目录为 `/freud/governance`，可通过 `GOVERNANCE_HDFS_ROOT` 调整。
 
@@ -177,6 +196,8 @@ plugins/movielens/        可独立安装的课程插件
 
 前端参考 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness/tree/39163dd30f703a79079e2d2446545cff3c453738/packages/client)，复用了其主题、部分侧栏与输入框样式以及 Markdown 中文加粗规则。版权与许可见 [web/LICENSE](web/LICENSE)。
 
+工具输出的首尾裁剪参考了 [DeepSeek Harness 的工具结果裁剪设计](https://github.com/deepseek-ai/deepseek-harness/blob/39163dd30f703a79079e2d2446545cff3c453738/packages/compaction/compaction-tool-result-pruner/README.md)。
+
 ## 测试
 
 ```bash
@@ -188,18 +209,7 @@ pnpm build
 
 自动化测试包括工具调用协议、会话和网页任务、Hadoop 工作脚本，以及小型 MovieLens 格式数据上的模型训练与查询。实际数据的评分和分析结论以对应任务生成的报告为准。
 
-需要热更新前端时，先启动默认端口的 `freud-web`，再在 `web` 目录运行 `pnpm dev`，访问 `http://127.0.0.1:8090/`。
-
-## 其他入口
-
-终端交互和批处理可用于编程任务：
-
-```bash
-uv run freud
-uv run freud --file task.md
-```
-
-`uv run freud --mock` 和 `uv run freud-web --mock` 可用于检查模拟交互；网页 Mock 模式不会运行数据任务。
+需要热更新前端时，先在 `web` 目录运行 `pnpm build`，再从项目根目录启动默认端口的 `freud-web`。然后在 `web` 目录运行 `pnpm dev`，访问 `http://127.0.0.1:8090/`。常规启动时更新前端后重新构建并刷新网页，更新 Python 代码或切换插件后重启 `freud-web`。
 
 ## 课程文档
 
