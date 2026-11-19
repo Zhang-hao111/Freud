@@ -1,0 +1,308 @@
+import tempfile
+import unittest
+from io import BytesIO
+from threading import Event
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from unittest.mock import Mock, patch
+
+from agent.llm import MockLLM
+from agent.session import SessionStore
+from agent.types import Action, AssistantMessage, ToolMessage, ToolResult, UserMessage
+from agent.web import WebAgent, make_handler
+from agent.workspaces import WorkspaceRegistry
+
+
+class WebAgentTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.config = {'workspace': self.tmp.name, 'traces_dir': str(Path(self.tmp.name) / 'traces'), 'shell_timeout': 5, 'max_steps': 4, 'api_key': '', 'model': '', 'api_base': ''}
+        self.store = SessionStore(Path(self.tmp.name) / 'sessions')
+
+    def test_session_detail_keeps_polling_if_run_finishes_during_history_read(self):
+        app = WebAgent(self.config, self.store)
+        conversations = app.conversations
+        session = conversations.new_session()
+        session_id = session.data['id']
+
+        def load_then_finish(key):
+            snapshot = self.store.get(key)
+            session.save([AssistantMessage(content='任务结果', workflow=True)])
+            conversations.active.pop(key)
+            return snapshot
+
+        handler_type = make_handler(app)
+        handler = handler_type.__new__(handler_type)
+        handler.path = f'/api/sessions/{session_id}'
+        handler.allowed = Mock(return_value=True)
+        handler.reply = Mock()
+        conversations.active[session_id] = Event()
+        with patch.object(conversations, 'session', side_effect=load_then_finish):
+            handler.do_GET()
+        self.assertEqual(handler.reply.call_args.args[1]['run_status'], 'running')
+        self.assertEqual(handler.reply.call_args.args[1]['messages'], [])
+
+        handler.do_GET()
+        detail = handler.reply.call_args.args[1]
+        self.assertEqual(detail['run_status'], 'idle')
+        self.assertEqual(detail['messages'][0]['content'], '任务结果')
+
+    def test_rejected_write_is_fed_back_and_conversation_can_continue(self):
+        target = Path(self.tmp.name) / 'example.txt'
+        action = Action(type='call_tool', tool='write_file', args={'path': str(target), 'content': 'hello'}, tool_call_id='call_1')
+        llm = MockLLM([action, '收到'])
+        app = WebAgent(self.config, self.store, lambda: llm)
+        session = self.store.new(workspace=self.tmp.name)
+        events = []
+        def emit(event):
+            events.append(event)
+            if event['type'] == 'approval':
+                self.assertTrue(app.approve(event['id'], False))
+        app.chat(session, '测试', emit)
+        self.assertFalse(target.exists())
+        messages = app.conversations.session(session.data['id']).messages
+        calls = [m for m in messages if isinstance(m, AssistantMessage) and m.tool_calls]
+        results = [m for m in messages if isinstance(m, ToolMessage)]
+        self.assertEqual(calls[0].tool_calls[0]['id'], results[0].tool_call_id)
+        self.assertIn('拒绝', results[0].content)
+        self.assertEqual(messages[-1].content, '收到')
+        self.assertEqual([e['type'] for e in events], ['tool', 'approval', 'result', 'assistant'])
+
+    def test_approved_write_uses_real_tool(self):
+        target = Path(self.tmp.name) / 'approved.txt'
+        action = Action(type='call_tool', tool='write_file', args={'path': str(target), 'content': 'hello'}, tool_call_id='call_1')
+        app = WebAgent(self.config, self.store, lambda: MockLLM([action, '完成']))
+        session = self.store.new(workspace=self.tmp.name)
+        def emit(event):
+            if event['type'] == 'approval':
+                app.approve(event['id'], True)
+        app.chat(session, '写入', emit)
+        self.assertEqual(target.read_text(), 'hello')
+        self.assertEqual(app.conversations.session(session.data['id']).messages[-1].content, '完成')
+
+    def test_accept_mode_writes_without_approval(self):
+        target = Path(self.tmp.name) / 'accepted.txt'
+        action = Action(type='call_tool', tool='write_file', args={'path': str(target), 'content': 'ok'}, tool_call_id='call_1')
+        app = WebAgent(self.config, self.store, lambda: MockLLM([action, '完成']))
+        session = self.store.new(workspace=self.tmp.name)
+        events = []
+        app.chat(session, '写入', events.append, permission_mode='accept')
+        self.assertEqual(target.read_text(), 'ok')
+        self.assertFalse(any(event['type'] == 'approval' for event in events))
+
+    def test_accept_asks_for_escalated_command_and_yolo_skips_it(self):
+        for mode, expected_approval in [('accept', True), ('yolo', False)]:
+            action = Action(type='call_tool', tool='shell', args={'command': 'fdisk -l'}, tool_call_id='call_1')
+            app = WebAgent(self.config, self.store, lambda: MockLLM([action, '完成']))
+            session = self.store.new(workspace=self.tmp.name)
+            events = []
+            def emit(event):
+                events.append(event)
+                if event['type'] == 'approval':
+                    app.approve(event['id'], True)
+            with patch('agent.registry.ToolRegistry.execute', return_value=ToolResult(True, data='ok')) as execute:
+                app.chat(session, '检查', emit, permission_mode=mode)
+            self.assertEqual(any(event['type'] == 'approval' for event in events), expected_approval)
+            execute.assert_called_once()
+
+    def test_yolo_still_blocks_denied_commands(self):
+        action = Action(type='call_tool', tool='shell', args={'command': ':(){ :|:& };:'}, tool_call_id='call_1')
+        app = WebAgent(self.config, self.store, lambda: MockLLM([action, '完成']))
+        session = self.store.new(workspace=self.tmp.name)
+        events = []
+        app.chat(session, '执行', events.append, permission_mode='yolo')
+        self.assertTrue(any(event['type'] == 'result' and '安全护栏' in event['content'] for event in events))
+        self.assertFalse(any(event['type'] == 'approval' for event in events))
+
+    def test_invalid_permission_mode_is_rejected(self):
+        app = WebAgent(self.config, self.store, mock=True)
+        session = self.store.new(workspace=self.tmp.name)
+        with self.assertRaises(ValueError):
+            app.chat(session, '执行', lambda event: None, permission_mode='invalid')
+
+    def test_mock_approval_does_not_write(self):
+        app = WebAgent(self.config, self.store, mock=True)
+        session = self.store.new(workspace=self.tmp.name)
+        events = []
+        def emit(event):
+            events.append(event)
+            if event['type'] == 'approval':
+                app.approve(event['id'], True)
+        app.chat(session, '测试', emit)
+        self.assertIn('未执行', next(e['content'] for e in events if e['type'] == 'result'))
+        self.assertFalse(Path('mock.txt').exists())
+
+    def test_disconnect_preserves_tool_protocol(self):
+        action = Action(type='call_tool', tool='write_file', args={'path': 'a', 'content': 'x'}, tool_call_id='call_1')
+        app = WebAgent(self.config, self.store, lambda: MockLLM([action]))
+        session = self.store.new(workspace=self.tmp.name)
+        def emit(event):
+            raise BrokenPipeError()
+        with self.assertRaises(BrokenPipeError):
+            app.chat(session, '测试', emit)
+        messages = app.conversations.session(session.data['id']).messages
+        self.assertEqual(messages[-1].tool_call_id, 'call_1')
+        self.assertIn('中断', messages[-1].content)
+        self.assertNotIn(session.data['id'], app.conversations.active)
+
+    def test_disconnect_after_tool_execution_persists_actual_result(self):
+        action = Action(type='call_tool', tool='shell', args={'command': 'pwd'}, tool_call_id='pwd')
+        app = WebAgent(self.config, self.store, lambda: MockLLM([action]))
+        session = app.conversations.new_session()
+
+        def emit(event):
+            if event['type'] in ('result', 'error'):
+                raise BrokenPipeError()
+
+        with self.assertRaises(BrokenPipeError):
+            app.chat(session, '检查当前目录', emit, permission_mode='accept')
+        restored = app.conversations.session(session.data['id'])
+        self.assertEqual(restored.messages[-1].tool_call_id, 'pwd')
+        self.assertEqual(restored.messages[-1].content.strip(), self.tmp.name)
+
+    def test_disconnected_approval_releases_session_without_executing_tool(self):
+        action = Action(type='call_tool', tool='write_file', args={'path': 'a', 'content': 'x'}, tool_call_id='write')
+        app = WebAgent(self.config, self.store, lambda: MockLLM([action]))
+        session = app.conversations.new_session()
+        heartbeat = Mock(side_effect=BrokenPipeError)
+        events = []
+
+        with self.assertRaises(BrokenPipeError):
+            app.chat(session, '测试', events.append, heartbeat=heartbeat)
+
+        heartbeat.assert_called_once_with()
+        approval = next(event for event in events if event['type'] == 'approval')
+        self.assertFalse(app.approve(approval['id'], True))
+        self.assertFalse((Path(self.tmp.name) / 'a').exists())
+        self.assertEqual(app.conversations.run_status(session.data['id']), 'idle')
+        self.assertEqual(self.store.get(session.data['id']).messages[-1].tool_call_id, 'write')
+
+    def test_new_turn_uses_latest_history_even_if_transport_holds_an_old_snapshot(self):
+        conversations = WebAgent(self.config, self.store, lambda: MockLLM(['完成'])).conversations
+        session = conversations.new_session()
+        stale = conversations.session(session.data['id'])
+        conversations.chat(session, '第一轮', lambda _event: None)
+        conversations.chat(stale, '第二轮', lambda _event: None)
+
+        restored = conversations.session(session.data['id'])
+        self.assertEqual([message.content for message in restored.messages if isinstance(message, UserMessage)],
+                         ['第一轮', '第二轮'])
+
+    def test_duplicate_run_is_rejected(self):
+        app = WebAgent(self.config, self.store, mock=True)
+        session = self.store.new(workspace=self.tmp.name)
+        app.conversations.active[session.data['id']] = Event()
+        with self.assertRaises(ValueError):
+            app.chat(session, '测试', lambda event: None)
+
+    def test_conflicting_chat_returns_409_before_streaming(self):
+        app = WebAgent(self.config, self.store, mock=True)
+        session = app.conversations.new_session()
+        body = ('{"session_id": "%s", "text": "retry later"}' % session.data['id']).encode()
+        handler_type = make_handler(app)
+        handler = handler_type.__new__(handler_type)
+        handler.path = '/api/chat'
+        handler.headers = {'Content-Type': 'application/json', 'Content-Length': str(len(body))}
+        handler.rfile = BytesIO(body)
+        handler.allowed = Mock(return_value=True)
+        handler.reply = Mock()
+        handler.send_response = Mock()
+        handler.send_header = Mock()
+        handler.end_headers = Mock()
+        handler.wfile = BytesIO()
+
+        with session.turn():
+            handler.do_POST()
+
+        handler.send_response.assert_not_called()
+        self.assertEqual(handler.reply.call_args.args[0], 409)
+        self.assertEqual(self.store.get(session.data['id']).messages, [])
+
+    def test_workspace_persists_and_concurrent_tools_use_each_session_directory(self):
+        root = Path(self.tmp.name)
+        project = root / 'project'
+        project.mkdir()
+        alias = root / 'alias'
+        alias.symlink_to(project, target_is_directory=True)
+
+        def model():
+            return MockLLM([
+                Action(type='call_tool', tool='write_file',
+                       args={'path': 'relative.txt', 'content': '项目文件'}, tool_call_id='write'),
+                Action(type='call_tool', tool='read_file', args={'path': 'relative.txt'}, tool_call_id='read'),
+                Action(type='call_tool', tool='shell', args={'command': 'pwd'}, tool_call_id='pwd'),
+                '完成',
+            ])
+
+        app = WebAgent(self.config, self.store, model)
+        with self.assertRaisesRegex(ValueError, '绝对路径'):
+            app.conversations.workspaces.add('relative')
+        added = app.conversations.workspaces.add(str(project))
+        self.assertEqual(app.conversations.workspaces.add(str(alias)), added)
+        app = WebAgent(self.config, self.store, model)
+        self.assertEqual(app.conversations.workspaces.list(), [app.conversations.workspaces.default, added])
+        default_session = app.conversations.new_session()
+        project_session = app.conversations.new_session(added['id'])
+        sessions = (default_session, project_session)
+        directories = (root, project)
+        ids = app.conversations.workspace_ids()
+        self.assertEqual([app.conversations.session_info(s, ids)['workspace_id'] for s in sessions],
+                         ['default', added['id']])
+
+        def run(session):
+            events = []
+            app.chat(session, '验证工作目录', events.append, permission_mode='accept')
+            return [event['content'] for event in events if event['type'] == 'result']
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(run, sessions))
+        for directory, result in zip(directories, results):
+            self.assertTrue((directory / 'relative.txt').is_file())
+            self.assertEqual(result[1:], ['项目文件', str(directory) + '\n'])
+        self.assertEqual(len(list((root / 'traces').glob('trace-*.json'))), 2)
+
+    def test_workspace_registration_keeps_concurrent_additions(self):
+        root = Path(self.tmp.name)
+        left_path = root / 'left'
+        right_path = root / 'right'
+        left_path.mkdir()
+        right_path.mkdir()
+        path = root / 'workspaces.json'
+        left = WorkspaceRegistry(root, path)
+        right = WorkspaceRegistry(root, path)
+        first_read = Event()
+        second_read = Event()
+        release = Event()
+        left_projects = left._projects
+        right_projects = right._projects
+
+        def hold_first_snapshot():
+            projects = left_projects()
+            first_read.set()
+            if not release.wait(3):
+                raise TimeoutError('未释放第一个登记请求')
+            return projects
+
+        def watch_second_snapshot():
+            projects = right_projects()
+            second_read.set()
+            return projects
+
+        with patch.object(left, '_projects', side_effect=hold_first_snapshot), \
+             patch.object(right, '_projects', side_effect=watch_second_snapshot), ThreadPoolExecutor(2) as executor:
+            first = executor.submit(left.add, str(left_path))
+            try:
+                self.assertTrue(first_read.wait(2))
+                second = executor.submit(right.add, str(right_path))
+                if second_read.wait(.25):
+                    second.result(2)
+            finally:
+                release.set()
+            added = {first.result(2)['id'], second.result(2)['id']}
+
+        self.assertEqual({row['id'] for row in left.list()[1:]}, added)
+
+
+if __name__ == '__main__':
+    unittest.main()

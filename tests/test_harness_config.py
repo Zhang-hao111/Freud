@@ -1,5 +1,6 @@
 """config 全局路径回归测试（阶段三：全局 freud 修复）。"""
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -22,18 +23,18 @@ class ConfigPathTest(unittest.TestCase):
 
     def test_global_fallback_found(self):
         """cwd 和仓库根都没有配置时，全局位置可被找到。"""
-        with tempfile_temporary_chdir():
-            with mock.patch.dict('os.environ', {'HOME': '/tmp/fakehome'}):
-                with mock.patch.object(config, '__file__', config.__file__):
-                    # 仓库根候选指向真实仓库（有 config.json），因此这里只验证
-                    # _find_config 返回存在的路径且优先级有序
-                    found = config._find_config()
-                    self.assertIsNotNone(found)
-                    self.assertTrue(found.exists())
+        with tempfile_temporary_chdir(), tempfile.TemporaryDirectory() as root:
+            home = Path(root)
+            settings = home / '.agent-harness' / 'config.json'
+            settings.parent.mkdir()
+            settings.write_text('{}', encoding='utf-8')
+            with mock.patch.object(Path, 'home', return_value=home), \
+                 mock.patch.object(config, '__file__', home / 'checkout' / 'agent' / 'config.py'):
+                self.assertEqual(config._find_config(), settings)
 
 
 def tempfile_temporary_chdir():
-    import contextlib, os, tempfile
+    import contextlib, os
 
     @contextlib.contextmanager
     def _ctx():

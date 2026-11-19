@@ -28,13 +28,13 @@
 安装或同步依赖：
 
 ```bash
-uv sync
+uv sync --extra movielens
 ```
 
 训练并登记六种算法的实际结果：
 
 ```bash
-uv run freud-analysis-train \
+uv run --extra movielens freud-analysis-train \
   --iteration1-run governance-runs/<迭代一任务ID> \
   --output analysis-runs \
   --min-history 2 \
@@ -44,13 +44,7 @@ uv run freud-analysis-train \
   --target-dimensions 2
 ```
 
-启动分析 Agent 和前端：
-
-```bash
-uv run freud-analysis --results analysis-runs --host 127.0.0.1 --port 8865
-```
-
-浏览器访问 `http://127.0.0.1:8865/`。该功能不调用外部大模型，也不消耗大模型 API Token；自然语言任务识别和追问均只基于已登记结果。
+训练也可以直接在 Freud 网页完成。按[总 README](../../README.md#网页交互)构建并启动 `freud-web`，浏览器访问 `http://127.0.0.1:8875/`，在同一会话中查看六种算法总览、查询结果、报告和图表。任务工具使用已登记结果，配置 LLM 后可基于这些证据进行解读和追问。
 
 ## 数据与评价口径
 
@@ -101,13 +95,13 @@ analysis-runs/
 专项测试命令：
 
 ```bash
-uv run python -m unittest tests.test_analysis -v
+uv run --extra movielens python -m unittest tests.test_analysis -v
 ```
 
 完整回归命令：
 
 ```bash
-uv run python -m unittest discover -s tests -v
+uv run --extra movielens python -m unittest discover -s tests -v
 ```
 
 测试使用带真实哈希、数据版本和 `T1/T2` 的小型 MovieLens 格式数据，实际运行 `scikit-learn` 训练、预测、聚类和降维，不使用 mock 模型。该数据用于控制资源开销和验证行为，不代表 MovieLens 1M 全量评价结果；全量指标必须以用户自己的迭代一全量成功产物重新训练后生成。

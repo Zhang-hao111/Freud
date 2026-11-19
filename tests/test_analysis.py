@@ -1,19 +1,18 @@
 import hashlib
-import io
 import json
 import tempfile
-import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 import joblib
+from sklearn.cluster import KMeans
 
-from analysis.data import IterationOneDataset, digest, event_features, user_profiles
-from analysis.tools import AnalysisRegistry, tool_catalog
-from analysis.training import AnalysisTrainer, classification_metrics
-from analysis.web import AnalysisAgent, Handler, grounded_follow_up
+from movielens_plugin.analysis.data import IterationOneDataset, digest, event_features, user_profiles
+from movielens_plugin.analysis.tools import AnalysisRegistry, tool_catalog
+from movielens_plugin.analysis.training import AnalysisTrainer, classification_metrics
+from movielens_plugin.analysis.service import AnalysisService, grounded_follow_up
 
 
 def create_iteration1_run(root, short_user=False):
@@ -116,7 +115,7 @@ class AnalysisTests(unittest.TestCase):
             run_dir = Path(directory)
             (run_dir / "models").mkdir()
             trainer = AnalysisTrainer(self.iteration1_run, run_dir)
-            with patch("analysis.training.classification_metrics", side_effect=check):
+            with patch("movielens_plugin.analysis.training.classification_metrics", side_effect=check):
                 trainer._train_classifiers(run_dir, matrices, targets)
 
     def test_training_registers_six_algorithms_and_artifacts(self):
@@ -153,6 +152,38 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(len(reduction["cluster_comparison"]["user_assignments"]), 3)
         self.assertIn("peak_memory_bytes", reduction["resource_usage"])
         self.assertEqual(reduction["data_split"]["train"]["records"], 48)
+
+    def test_reducers_fit_kmeans_once_in_original_space_and_reuse_its_baseline(self):
+        fit_predict = KMeans.fit_predict
+        dimensions = []
+
+        def record_fit(model, matrix):
+            dimensions.append(matrix.shape[1])
+            return fit_predict(model, matrix)
+
+        output = self.root / "shared-baseline"
+        with patch.object(KMeans, 'fit_predict', record_fit):
+            registry = AnalysisTrainer(self.iteration1_run, output).run(task_id="baseline")
+        self.assertEqual(dimensions, [registry["profiles"]["original_dimensions"], 2, 2])
+        run = output / "baseline"
+        kmeans = json.loads((run / "clusters/kmeans.json").read_text())
+        for name in ("pca", "truncated_svd"):
+            reduction = json.loads((run / f"reductions/{name}.json").read_text())
+            self.assertEqual(reduction["original_cluster_assignments"], kmeans["assignments"])
+            self.assertEqual(reduction["cluster_comparison"]["original_silhouette"],
+                             kmeans["metrics"]["silhouette"])
+
+    def test_classification_does_not_load_profiles(self):
+        from movielens_plugin.analysis.tools import load_json
+
+        def without_profiles(path):
+            self.assertNotEqual(Path(path).name, "profiles.json")
+            return load_json(path)
+
+        with patch("movielens_plugin.analysis.tools.load_json", side_effect=without_profiles):
+            registry = AnalysisRegistry(self.output_dir)
+            result = tool_catalog(registry)["logistic_regression"].execute({"user_id": 1, "movie_id": 10})
+        self.assertTrue(result.success, result.error)
 
     def test_parameterized_clustering_refits_and_persists_results(self):
         tools = tool_catalog(self.registry)
@@ -250,33 +281,24 @@ class AnalysisTests(unittest.TestCase):
         self.assertIn("训练期历史不足", result.error)
 
     def test_agent_defaults_to_two_algorithms_and_supports_follow_up(self):
-        agent = AnalysisAgent(self.output_dir)
-        job = agent.start("请用两种分类算法预测是否会给高分", user_id=1, movie_id=10)
-        for _ in range(100):
-            completed = agent.get(job["task_id"])
-            if completed["status"] != "running":
-                break
-            time.sleep(0.01)
+        agent = AnalysisService(self.output_dir)
+        phases = []
+        completed = agent.run("请用两种分类算法预测是否会给高分", user_id=1, movie_id=10,
+                              on_progress=phases.append)
+        self.assertEqual(phases, ["加载已登记结果", "调用分析工具", "已完成"])
         self.assertEqual(completed["status"], "completed")
         self.assertEqual([item["algorithm"] for item in completed["results"]],
                          ["logistic_regression", "random_forest"])
         answer = grounded_follow_up(completed, "两种算法评价指标有什么差异？")
-        self.assertIn("logistic_regression", answer)
-        self.assertIn("random_forest", answer)
+        self.assertIn("| 逻辑回归 | 测试期 |", answer)
+        self.assertIn("| 随机森林 | 验证期 |", answer)
 
     def test_agent_rejects_missing_inputs_and_unregistered_algorithm(self):
-        agent = AnalysisAgent(self.output_dir)
+        agent = AnalysisService(self.output_dir)
         with self.assertRaisesRegex(ValueError, "UserID 和 MovieID"):
-            agent.start("请做分类预测", user_id=1)
+            agent.run("请做分类预测", user_id=1)
         with self.assertRaisesRegex(ValueError, "未实现算法"):
-            agent.start("请做用户聚类", user_ids=[1, 2], algorithm="spectral")
-
-    def test_request_body_must_be_object(self):
-        handler = object.__new__(Handler)
-        handler.headers = {"Content-Length": "2"}
-        handler.rfile = io.BytesIO(b"[]")
-        with self.assertRaisesRegex(ValueError, "必须是对象"):
-            handler.body_json()
+            agent.run("请做用户聚类", user_ids=[1, 2], algorithm="spectral")
 
 
 if __name__ == "__main__":

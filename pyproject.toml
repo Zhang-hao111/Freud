@@ -14,11 +14,11 @@ classifiers = [
 ]
 
 dependencies = [
-    "joblib>=1.4.0",
-    "numpy>=2.0.0",
     "openai>=1.0.0",
-    "scikit-learn>=1.6.0",
 ]
+
+[project.optional-dependencies]
+movielens = ["freud-movielens"]
 
 [project.urls]
 Homepage = "https://github.com/your-username/Lab-coding-agent"
@@ -26,16 +26,21 @@ Source = "https://github.com/your-username/Lab-coding-agent"
 
 [project.scripts]
 freud = "agent.cli:main"
-freud-governance = "governance.web:main"
-freud-analysis-train = "analysis.training:main"
-freud-analysis = "analysis.web:main"
+freud-web = "agent.web:main"
 
 [tool.setuptools.packages.find]
-include = ["agent*", "analysis*", "governance*"]
+include = ["agent*"]
+namespaces = false
 
 [tool.setuptools.package-data]
-governance = ["index.html"]
-analysis = ["index.html"]
+agent = ["web_dist/*", "web_dist/static/*", "web_dist/static/media/*"]
+
+[tool.uv.workspace]
+members = ["plugins/movielens"]
+
+[tool.uv.sources]
+coding-agent = { workspace = true }
+freud-movielens = { workspace = true }
 
 [build-system]
 requires = ["setuptools>=68.0"]

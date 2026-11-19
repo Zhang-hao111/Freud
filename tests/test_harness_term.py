@@ -30,7 +30,7 @@ class PermissionsTest(unittest.TestCase):
 
     def test_needs_confirm(self):
         self.assertTrue(needs_confirm('ask', 'write_file'))
-        self.assertFalse(needs_confirm('ask', 'shell'))
+        self.assertTrue(needs_confirm('ask', 'shell'))
         self.assertFalse(needs_confirm('ask', 'read_file'))
         self.assertFalse(needs_confirm('accept', 'write_file'))
         self.assertFalse(needs_confirm('yolo', 'write_file'))

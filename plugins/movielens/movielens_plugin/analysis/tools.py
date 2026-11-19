@@ -4,6 +4,7 @@ import hashlib
 import json
 import time
 import tracemalloc
+from functools import cached_property
 from pathlib import Path
 
 import joblib
@@ -14,8 +15,8 @@ from sklearn.metrics import adjusted_rand_score
 from sklearn.preprocessing import StandardScaler
 
 from agent.types import BaseTool, ToolResult
-from analysis.data import inference_feature
-from analysis.training import (RANDOM_STATE, cluster_summaries, clustering_metrics,
+from movielens_plugin.analysis.data import inference_feature
+from movielens_plugin.analysis.training import (RANDOM_STATE, RESOURCE_MEASUREMENT, cluster_summaries, clustering_metrics,
                                svg_plot)
 
 
@@ -40,7 +41,10 @@ class AnalysisRegistry:
         if self.data.get("status") != "completed":
             raise ValueError("迭代二结果未完成")
         self.feature_state = load_json(self.run_dir / "feature-state.json")
-        self.profiles = load_json(self.run_dir / "profiles.json")
+
+    @cached_property
+    def profiles(self):
+        return load_json(self.run_dir / "profiles.json")
 
     def path(self, relative):
         candidate = (self.run_dir / relative).resolve()
@@ -292,14 +296,17 @@ class ReductionTool(RegisteredTool):
         cluster_parameters = args.get("cluster_parameters") or {}
         if not isinstance(cluster_parameters, dict):
             raise ValueError("cluster_parameters 必须是对象")
-        tracemalloc.start()
-        started = time.perf_counter()
-        coordinates = reducer.fit_transform(scaled)
-        original_labels, reduced_labels, actual_cluster = self._cluster_pair(
-            scaled, coordinates, cluster_algorithm, cluster_parameters)
-        elapsed = time.perf_counter() - started
-        _, peak_bytes = tracemalloc.get_traced_memory()
-        tracemalloc.stop()
+        with RESOURCE_MEASUREMENT:
+            tracemalloc.start()
+            try:
+                started = time.perf_counter()
+                coordinates = reducer.fit_transform(scaled)
+                original_labels, reduced_labels, actual_cluster, durations = self._cluster_pair(
+                    scaled, coordinates, cluster_algorithm, cluster_parameters)
+                elapsed = time.perf_counter() - started
+                _, peak_bytes = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
         parameters = {"target_dimensions": args.get("target_dimensions"),
                       "information_threshold": threshold, "actual_dimensions": target,
                       "random_state": RANDOM_STATE, "cluster_algorithm": cluster_algorithm,
@@ -333,7 +340,10 @@ class ReductionTool(RegisteredTool):
             "reduced_cluster_assignments": {
                 str(user_id): int(label) for user_id, label in zip(user_ids, reduced_labels)
             },
-            "resource_usage": {"runtime_seconds": round(elapsed, 6), "peak_memory_bytes": int(peak_bytes)},
+            "resource_usage": {"runtime_seconds": round(elapsed, 6),
+                               "original_clustering_seconds": durations[0],
+                               "reduced_clustering_seconds": durations[1],
+                               "peak_memory_bytes": int(peak_bytes)},
             "model_path": str(model_path.relative_to(self.registry.run_dir)),
             "plot_path": str(plot_path.relative_to(self.registry.run_dir)),
             "profile_version": self.registry.data["profiles"]["version"],
@@ -353,8 +363,7 @@ class ReductionTool(RegisteredTool):
                       "n_init": int(parameters.get("n_init", 20)), "random_state": RANDOM_STATE}
             if not 2 <= actual["n_clusters"] < len(original):
                 raise ValueError("n_clusters 必须至少为 2 且小于画像用户数")
-            original_labels = KMeans(**actual).fit_predict(original)
-            reduced_labels = KMeans(**actual).fit_predict(reduced)
+            model = KMeans
         elif algorithm == "dbscan":
             allowed = {"eps", "min_samples"}
             if set(parameters) - allowed:
@@ -363,11 +372,15 @@ class ReductionTool(RegisteredTool):
                       "min_samples": int(parameters.get("min_samples", 2))}
             if actual["eps"] <= 0 or actual["min_samples"] < 2:
                 raise ValueError("DBSCAN 要求 eps>0 且 min_samples>=2")
-            original_labels = DBSCAN(**actual).fit_predict(original)
-            reduced_labels = DBSCAN(**actual).fit_predict(reduced)
+            model = DBSCAN
         else:
             raise ValueError(f"未实现的对照聚类算法：{algorithm}")
-        return original_labels, reduced_labels, actual
+        started = time.perf_counter()
+        original_labels = model(**actual).fit_predict(original)
+        reduced_started = time.perf_counter()
+        reduced_labels = model(**actual).fit_predict(reduced)
+        durations = (round(reduced_started - started, 6), round(time.perf_counter() - reduced_started, 6))
+        return original_labels, reduced_labels, actual, durations
 
 
 class PCATool(ReductionTool):

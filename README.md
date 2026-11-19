@@ -1,270 +1,208 @@
-# Freud
+# Freud · MovieLens 数据分析 Agent
 
-Freud 是一个大数据课程实验项目，包含终端编程助手，以及基于 MovieLens 1M 的数据治理和分析系统。
+Freud 是大数据分析课程项目。MovieLens 课程插件将 Hadoop 数据治理、机器学习分析和 Agent 对话接入同一个网页。用户可以提交数据任务、查看执行进度与报告，并针对实际结果继续提问。
 
-- **编程助手**：结合 OpenAI 兼容模型与本地工具，读取和修改文件、执行命令、运行测试，并提供权限检查、会话恢复和执行轨迹。
-- **迭代一：数据治理**：通过 Hadoop Streaming 检查和清洗数据，比较清洗前后的五维质量评分，生成版本化数据、报告和时间边界。
-- **迭代二：数据分析**：使用迭代一产物进行分类、聚类和降维，通过网页查看结果、评价指标和图表。
+项目目前完成迭代一和迭代二。迭代三的知识图谱与图分析是课程后续内容，尚未实现。
 
-分析流程为：`MovieLens 原始数据 → 迭代一清洗与评估 → 迭代二训练与查询`。迭代二要求迭代一产物的版本、哈希和 `T1/T2` 有效；数据或结果不可用时返回明确错误。迭代三是课程计划中的后续工作，当前仓库尚未实现。
+```text
+MovieLens 1M
+    │
+    ▼
+迭代一 · Hadoop 数据检查、清洗和五维质量评估
+    │  清洗数据、数据版本、报告、T1/T2
+    ▼
+迭代二 · 分类、聚类和降维训练
+    │  模型、用户画像、指标、坐标和图表
+    ▼
+网页查询、结果解读与追问
+```
 
-## 数据治理与分析
+## 已实现的课程功能
 
-### 迭代一：清洗与评估
+### 迭代一：数据治理
 
-准备 Python 3.11+、`uv`、Hadoop 3 和 Hadoop Streaming jar，将 MovieLens 的 `users.dat`、`movies.dat`、`ratings.dat` 放入 `ml-1m/ml-1m/`。原始数据和运行产物不随仓库分发。
+通过 Hadoop Streaming 检查并清洗用户、电影和评分数据，对清洗前后数据使用同一套规则评估 Accurate、Complete、Unique、Up-to-date 和 Consistent 五个质量维度。任务保存清洗数据、异常处置记录、数据与规则版本、评估报告，以及供后续训练使用的时间边界 T1/T2。
+
+实现细节与评分口径见 [迭代一说明](docs/iteration1/README.md)。
+
+### 迭代二：数据分析
+
+迭代二读取已完成的迭代一产物，核对数据版本、文件哈希和时间边界，再训练并登记六种算法。
+
+| 任务 | 算法 | 主要结果 |
+| --- | --- | --- |
+| 分类 | Logistic Regression、Random Forest | 用户对电影给出至少 4 分的预测概率与类别、验证及测试指标 |
+| 聚类 | K-Means、DBSCAN | 用户群体、群体画像、噪声标记及聚类指标 |
+| 降维 | PCA、Truncated SVD | 用户坐标、保留方差、二维图及压缩前后聚类对照 |
+
+分类与用户画像使用训练期数据。验证期用于分类模型选型，测试期用于最终评价。聚类和降维默认要求用户在训练期至少有两条评分，历史不足时不会生成该用户的画像。
+
+查询会返回已登记的实际结果，并可下载报告。配置 LLM 后，系统还会根据结果生成解读并回答追问。算法参数、评价指标和数据口径见 [迭代二说明](docs/iteration2/README.md)。
+
+## 环境准备
+
+- Linux、Python 3.11 或更新版本，以及 [uv](https://docs.astral.sh/uv/)
+- 从源码构建网页需要 Node.js 22.12 或更新版本及 pnpm
+- 普通 Agent 的 Shell 工具需要 Bubblewrap（`bwrap`）0.8.0 或更新版本，以及可用的非特权 Linux 用户命名空间。可用 `bwrap --version` 检查。Ubuntu 22.04 默认仓库的 0.6.1 需要升级才可使用 Shell 工具
+- MovieLens 课程任务需要 Hadoop 3、Hadoop Streaming jar、工作节点上的 Python 3，以及三个原始数据文件
+- 普通对话需要兼容 OpenAI Chat Completions API 的模型服务。课程任务可以独立运行，配置模型后还可解读结果和继续追问
+
+将原始数据放在项目根目录的 `ml-1m/ml-1m/`。如果数据和运行产物放在其他位置，用 `MOVIELENS_ROOT` 指定包含 `ml-1m/` 的绝对路径。
+
+```text
+ml-1m/ml-1m/
+├── users.dat
+├── movies.dat
+└── ratings.dat
+```
+
+保留原始文件格式和编码。数据、API Key、模型和运行结果不随仓库分发。
+
+## 安装与启动
+
+### 从源码启动课程网页
+
+在项目根目录安装 Agent 和 MovieLens 插件，再构建网页。
 
 ```bash
-uv sync
+uv sync --extra movielens
+cd web
+pnpm install --frozen-lockfile
+pnpm build
+cd ..
+```
+
+配置 Hadoop Streaming jar，路径根据本机安装位置填写：
+
+```bash
 export HADOOP_STREAMING_JAR=/path/to/hadoop-streaming-3.x.x.jar
-uv run freud-governance --host 127.0.0.1 --port 8765
 ```
 
-打开 `http://127.0.0.1:8765/` 发起任务。成功后的 `governance-runs/<任务ID>/` 保存清洗数据、报告、数据版本和 `T1/T2`。Hadoop 本地模式可以运行实验，但不代表多节点集群部署。环境配置和评分口径见 [迭代一说明](docs/iteration1/README.md)。
-
-### 迭代二：分类、聚类和降维
-
-| 任务 | 已实现算法 |
-| --- | --- |
-| 分类 | Logistic Regression、Random Forest |
-| 聚类 | K-Means、DBSCAN |
-| 降维 | PCA、Truncated SVD |
-
-先使用迭代一成功任务目录训练并登记结果，再启动查询页面：
-
-```bash
-RUN_ID=你的迭代一任务ID
-uv run freud-analysis-train --iteration1-run "governance-runs/$RUN_ID" --output analysis-runs
-uv run freud-analysis --results analysis-runs --host 127.0.0.1 --port 8865
-```
-
-打开 `http://127.0.0.1:8865/` 查询。模型和报告保存在 `analysis-runs/`，不会随源码分发。分类与画像使用训练期数据，验证期用于模型选择，测试期用于最终评价。分析页面的任务识别和追问使用规则处理已登记结果，不调用外部大模型。算法参数、数据口径和结果文件说明见 [迭代二说明](docs/iteration2/README.md)。
-
-课程 PPT 未包含在仓库中，尚需核对上述算法是否全部属于课程指定范围。实验指标以具体数据版本的实际报告为准。
-
-## 编程助手
-
-### 主要能力
-
-- 交互式终端会话和单次任务文件两种运行方式；
-- 支持 OpenAI 兼容的 Chat Completions API；
-- 内置文件读取、文件写入和 Shell 命令工具；
-- 基于工具结果循环规划和执行任务；
-- 对危险命令进行允许、拒绝或人工确认分类；
-- 支持询问确认、自动接受编辑和无人值守三种权限模式；
-- 保存会话、笔记和消息历史，可在后续恢复；
-- 保存结构化执行轨迹，便于调试和复盘；
-- 提供不需要 API Key 的 Mock 模式用于测试流程。
-
-## 运行依赖
-
-### 必需环境
-
-- Python 3.11 或更高版本；
-- [`uv`](https://docs.astral.sh/uv/)；
-- Git 和可执行常用命令的本地 Shell。
-
-### Python 依赖
-
-项目安装时会自动安装：
-
-- `openai>=1.0.0`
-- `numpy>=2.0.0`、`joblib>=1.4.0`、`scikit-learn>=1.6.0`（数据分析）
-
-使用真实模型时，还需要一个兼容 OpenAI Chat Completions 协议的 API 地址、模型名称和 API Key。Mock 模式不需要外部模型服务。
-
-## 安装
-
-克隆仓库后，在项目目录执行：
-
-```bash
-uv tool install .
-```
-
-开发时建议使用可编辑安装，使命令直接跟随源码变化：
-
-```bash
-uv tool install --reinstall --editable .
-```
-
-也可以不安装全局命令，直接在仓库中运行：
-
-```bash
-uv sync
-uv run freud --help
-```
-
-## 配置
-
-Freud 按以下顺序查找 `config.json`：
-
-1. 当前工作目录；
-2. 源码仓库根目录；
-3. `~/.agent-harness/config.json`。
-
-示例配置：
+若需要 LLM 对话和结果解读，在项目根目录创建本地 `config.json`：
 
 ```json
 {
   "api_key": "your-api-key",
   "model": "your-model-name",
-  "api_base": "https://your-provider.example/v1",
-  "max_steps": 30,
-  "shell_timeout": 30
+  "api_base": "https://your-provider.example/v1"
 }
 ```
 
-环境变量的优先级高于配置文件：
+也可以使用 `LLM_API_KEY`（或 `DEEPSEEK_API_KEY`）、`LLM_MODEL` 和 `LLM_API_BASE` 环境变量。配置优先级为环境变量、`config.json`、程序默认值。数据任务无需 LLM 即可执行和展示登记结果。
 
-| 环境变量 | 用途 |
-| --- | --- |
-| `LLM_API_KEY` 或 `DEEPSEEK_API_KEY` | API Key |
-| `LLM_MODEL` | 模型名称 |
-| `LLM_API_BASE` | OpenAI 兼容 API 地址 |
-| `MAX_STEPS` | 单次任务最大 Agent 步数 |
-| `SHELL_TIMEOUT` | Shell 命令超时时间，单位为秒 |
-| `WORKSPACE` | 工具允许操作的工作目录 |
-| `TRACES_DIR` | 执行轨迹保存目录 |
+在项目根目录启动课程网页。
 
-配置优先级为：
+```bash
+uv run --extra movielens freud-web
+```
+
+访问 `http://127.0.0.1:8875/`，输入框下方的「数据任务」菜单应显示清洗、训练和查询三个入口。只使用通用 Agent 时，运行 `uv sync` 安装核心包，再用 `uv run freud-web` 启动已构建的网页。修改前端后运行 `pnpm build` 并刷新页面。切换插件或修改 Python 后端后，重启 `freud-web`。
+
+### 构建和安装 wheel
+
+先按上面的步骤构建网页，再从仓库根目录打包 Agent 和课程插件。
+
+```bash
+test -f agent/web_dist/index.html && uv build --wheel --out-dir dist
+uv build --wheel --out-dir dist plugins/movielens
+```
+
+把生成的 wheel 复制到使用目录，在该目录安装并启动。
+
+```bash
+uv venv
+uv pip install ./coding_agent-*.whl ./freud_movielens-*.whl
+.venv/bin/freud-web
+```
+
+按以上步骤构建的 Agent wheel 包含静态网页资源，安装后可以在任意工作目录开启网页。只使用 CLI 时，可从干净的源码目录执行 `uv tool install .`。运行课程任务前，仍需准备 MovieLens 数据并配置 Hadoop。
+
+## 网页交互
+
+### 运行两次迭代
+
+1. 新建对话，在输入框下方点击「＋ 数据任务」，选择「清洗与质量评估」。
+2. 输入「请清洗并评估 MovieLens 1M 数据」，等待 Hadoop 各阶段完成。页面展示五维评分对照、异常处置和数据版本，并提供报告下载。
+3. 在同一对话选择「训练分析模型」，输入「请使用清洗后的数据训练分析模型」。迭代一任务 ID 留空时，使用当前对话最近一次成功清洗结果。
+4. 训练完成后查看六种算法总览，也可以发送「查看六种算法」或下载训练报告。
+5. 选择「查询分析结果」，填写 UserID。分类查询还需要 MovieID，聚类和降维可输入多个以逗号分隔的 UserID。问题示例：
+   - 「比较两种分类算法对该用户给这部电影打至少 4 分的预测。」
+   - 「比较这些用户的群体归属，并标记噪声点。」
+   - 「对比两种降维算法的坐标、信息保留和聚类差异。」
+6. 查询完成后可在同一对话继续追问指标、参数和结果。点击「结束结果上下文」可切回普通对话。
+
+训练也可指定其他已完成的迭代一任务 ID。页面提供高级参数输入，参数和命令行训练方式见 [迭代二说明](docs/iteration2/README.md)。
+
+网页支持添加项目工作区、新建与删除对话，以及切换工具审批模式。文件工具限定在会话所在工作区，Shell 使用 Bubblewrap 隔离，能写入工作区和沙箱临时目录并读取基础系统工具。Shell 不继承启动进程的环境凭据，也无法访问外部网络。询问确认模式会对写文件和 Shell 分别请求确认。自动批准模式仍使用相同的工作区隔离。
+
+任务运行时可点击发送区的停止按钮。Shell 可终止正在运行的子进程，模型请求结束后停止后续步骤，Hadoop 和机器学习任务在下一个阶段边界停止。关闭网页后，数据任务可继续执行，重新打开该会话可以查看状态或请求停止。
+
+## 结果与数据目录
+
+课程产物保存在 `MOVIELENS_ROOT` 下，默认使用启动服务时的目录。会话和工作区登记保存在用户目录。
 
 ```text
-代码默认值 < config.json < 环境变量
+governance-runs/<任务ID>/    迭代一清洗数据、隔离记录、评估报告及中间结果
+analysis-runs/<任务ID>/      迭代二登记信息、模型、画像、群体、降维结果和图表
+analysis-runs/latest.json    最近一次成功的迭代二训练登记
+~/.agent-harness/sessions/   对话记录
+~/.agent-harness/workspaces.json   网页项目工作区登记
+~/.agent-harness/traces/     Agent 执行轨迹
 ```
 
-`config.json` 包含凭据，已经由 `.gitignore` 排除，不应提交到版本库，也不应出现在日志、截图或演示视频中。
+普通聊天按字符预算选取近期消息和当前会话的笔记。当前任务的输入完整保留，超出预算时会提示拆分任务。MovieLens 追问使用当前任务证据，新产生的报告保留在会话记录中，并与普通模型上下文分开。查询原始 JSON 可通过结果中的链接下载。删除会话同时清理该会话的查询附件和关联 trace。共享的清洗和训练产物仍可供其他会话使用。旧版未关联会话的 trace 需要单独清理。
 
-## 使用方式
+网页中迭代二查询优先使用当前对话的训练结果，也可读取 `analysis-runs/latest.json` 指向的结果。使用当前清洗上下文时会核对对应版本与时间边界。Hadoop 默认文件系统为本地文件系统时，网页使用本机临时目录存放中间文件；使用 HDFS 时默认根目录为 `/freud/governance`，可通过 `GOVERNANCE_HDFS_ROOT` 调整。
 
-### 交互模式
-
-直接启动：
-
-```bash
-freud
-```
-
-进入交互界面后，可以直接输入自然语言任务，也可以使用斜杠命令：
-
-| 命令 | 作用 |
-| --- | --- |
-| `/config` | 查看当前模型配置 |
-| `/key = ...` | 设置 API Key |
-| `/model = ...` | 设置模型名称 |
-| `/base-url = ...` | 设置 API 地址 |
-| `/run task.md` | 运行 Markdown 任务文件 |
-| `/resume` | 恢复历史会话 |
-| `/help` | 查看帮助 |
-| `/exit` | 退出程序 |
-
-### 任务文件模式
-
-将任务目标和验收要求写入 Markdown 文件，然后运行：
-
-```bash
-freud --file task.md --name "任务名称"
-```
-
-限制最大执行步数：
-
-```bash
-freud --file task.md --max-steps 50
-```
-
-### Mock 模式
-
-不访问外部模型，用于验证 CLI、会话和工具链路：
-
-```bash
-freud --mock
-freud --file task.md --mock
-```
-
-### 恢复会话
-
-启动时选择历史会话：
-
-```bash
-freud --resume
-```
-
-会话文件默认保存在 `~/.agent-harness/sessions/`。每个新任务默认创建独立会话，不会自动继承其他会话的上下文。
-
-## 权限与安全
-
-Freud 对工具操作提供三种权限模式，可在交互界面中使用 `Shift+Tab` 切换：
-
-| 模式 | 文件修改 | 高风险命令 |
-| --- | --- | --- |
-| `ask before edits` | 修改前询问 | 必须确认或拒绝 |
-| `accept edits on` | 自动允许普通编辑 | 仍按安全规则处理 |
-| `yolo - auto approve` | 自动允许 | 自动批准需要升级确认的操作，谨慎使用 |
-
-批处理模式可以使用 `--yes` 自动批准需要确认的命令：
-
-```bash
-freud --file task.md --yes
-```
-
-该选项适合受控的无人值守环境，不建议在包含重要文件或广泛系统权限的工作区中使用。安全护栏明确拒绝的命令不会因为 `--yes` 而绕过。
-
-## 执行流程
-
-一次任务通常经过以下循环：
-
-1. 读取系统配置、会话上下文和用户任务；
-2. 调用模型生成工具操作或完成结果；
-3. 权限模块和安全护栏检查工具调用；
-4. 执行文件或 Shell 工具；
-5. 将真实工具结果反馈给模型；
-6. 继续执行，直到完成、失败或达到最大步数。
-
-## 数据与日志
-
-| 路径 | 内容 |
-| --- | --- |
-| `~/.agent-harness/config.json` | 全局模型配置 |
-| `~/.agent-harness/sessions/` | 会话、消息和会话内笔记 |
-| `~/.agent-harness/traces/` | 每一步模型动作、工具结果和反馈 |
-| `tasks/` | 任务文件以及任务执行过程中生成的工作文件 |
-
-## 项目结构
+## 架构与项目结构
 
 ```text
-.
-├── agent/          # Agent 循环、模型接口、工具、权限、会话和终端界面
-├── governance/     # Hadoop 数据治理流程与网页
-├── analysis/       # 分类、聚类、降维训练与网页
-├── docs/           # 需求、设计和使用文档
-├── tasks/          # 任务描述及任务产物
-├── tests/          # 单元测试和回归测试
-├── main.py         # 兼容入口，转发到 agent.cli
-├── pyproject.toml  # 包信息、依赖和命令入口
-└── install.sh      # 安装辅助脚本
+网页 React
+   │ HTTP / NDJSON
+   ▼
+agent/web.py              网页接口与审批交互
+agent/conversations.py    会话回合、工作区和追问路由
+agent/context.py          模型请求的上下文组装
+agent/execution_scope.py  工作区文件访问与 Shell 隔离
+agent/workflows.py        任务、表单、追问与报告注册
+agent/plugins.py          发现并装配已安装插件
+   │
+plugins/movielens/        可独立安装的课程插件
+   └── movielens_plugin/  任务声明、结果解读与装配
+       ├── governance/    Hadoop 清洗与质量评估
+       └── analysis/      六种算法的训练、查询和报告
 ```
+
+`agent/runtime.py` 装配模型、工具和对话循环等服务，供网页、终端 REPL 和批处理共享。网页启动时从已安装 Python 包的 `freud.plugins` 入口发现插件。MovieLens 插件注册治理、训练和查询三个 `WorkflowTask`，分别声明表单、执行、追问、报告和结果解读能力。网页根据任务目录生成菜单和表单，由通用调度器调用插件。进度、结果和审批的事件格式见 [Web 协议](docs/web-protocol.md)。
+
+前端参考 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness/tree/39163dd30f703a79079e2d2446545cff3c453738/packages/client)，复用了其主题、部分侧栏与输入框样式以及 Markdown 中文加粗规则。版权与许可见 [web/LICENSE](web/LICENSE)。
 
 ## 测试
 
-运行全部测试：
-
 ```bash
-uv run python -m unittest discover -s tests -v
+uv run --extra movielens python -m unittest discover -s tests
+cd web
+pnpm type
+pnpm build
 ```
 
-查看命令参数：
+自动化测试包括工具调用协议、会话和网页任务、Hadoop 工作脚本，以及小型 MovieLens 格式数据上的模型训练与查询。实际数据的评分和分析结论以对应任务生成的报告为准。
+
+需要热更新前端时，先启动默认端口的 `freud-web`，再在 `web` 目录运行 `pnpm dev`，访问 `http://127.0.0.1:8090/`。
+
+## 其他入口
+
+终端交互和批处理可用于编程任务：
 
 ```bash
-freud --help
+uv run freud
+uv run freud --file task.md
 ```
 
-## 常用参数
+`uv run freud --mock` 和 `uv run freud-web --mock` 可用于检查模拟交互；网页 Mock 模式不会运行数据任务。
 
-| 参数 | 作用 |
-| --- | --- |
-| `--file FILE` | 从 Markdown 文件读取任务并直接执行 |
-| `--name NAME` | 设置任务名称 |
-| `--max-steps N` | 设置最大 Agent 步数 |
-| `--mock` | 使用 Mock LLM |
-| `--resume` | 选择并恢复历史会话 |
-| `--yes` | 自动批准需要确认的高风险操作 |
-| `--version` | 显示版本号 |
+## 课程文档
+
+- [项目总体要求与汇报安排](docs/requirements/引言_项目总体要求与汇报安排.md)
+- [迭代一需求](docs/requirements/迭代一_Hadoop数据清洗与Agent基础.md) · [运行与实现说明](docs/iteration1/README.md)
+- [迭代二需求](docs/requirements/迭代二_分类聚类降维与分析Agent.md) · [运行与实现说明](docs/iteration2/README.md)

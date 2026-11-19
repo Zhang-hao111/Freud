@@ -6,7 +6,7 @@ from typing import Literal
 
 # ---- Action ----
 
-ActionType = Literal['call_tool', 'done', 'take_note']
+ActionType = Literal['call_tool', 'done', 'take_note', 'invalid']
 
 
 @dataclass
@@ -19,6 +19,7 @@ class Action:
     note_key: str | None = None
     note_value: str | None = None
     tool_call_id: str | None = None
+    error: str | None = None
 
 
 # ---- Message ----
@@ -33,6 +34,8 @@ class SystemMessage:
 class UserMessage:
     role: Literal['user'] = 'user'
     content: str = ''
+    workflow: bool = False
+    internal: bool = False
 
 
 @dataclass
@@ -40,6 +43,7 @@ class AssistantMessage:
     role: Literal['assistant'] = 'assistant'
     content: str | None = None
     tool_calls: list | None = None  # list[ToolCall]
+    workflow: bool = False
 
 
 @dataclass
