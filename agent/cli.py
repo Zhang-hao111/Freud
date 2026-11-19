@@ -321,16 +321,13 @@ def repl(mock: bool = False, max_steps: int | None = None, resume: bool = False)
     # 新会话：记忆从零开始
     session = store.new(workspace=str(Path(config['workspace']).expanduser().resolve()))
     tracer = runtime['tracer'](session.data['id'])
-    messages = session.messages
-    memory = SessionMemory(session, live_messages=messages)
 
     def _switch_to(target: Session):
-        nonlocal session, memory, messages, tracer
-        tracer.flush()
+        nonlocal session, tracer
         session = target
         tracer = runtime['tracer'](session.data['id'])
-        messages = session.messages
-        memory = SessionMemory(session, live_messages=messages)
+        print(f"  ✓ 已恢复「{target.data['title']}」"
+              f"（{len(target.messages)} 条消息，{len(target.memory)} 条笔记）")
 
     _print_banner(mock=mock, config=config)
 
@@ -338,7 +335,6 @@ def repl(mock: bool = False, max_steps: int | None = None, resume: bool = False)
         picked = _pick_session(store)
         if picked is not None:
             _switch_to(picked)
-            print(f"  ✓ 已恢复「{picked.data['title']}」（{len(messages)} 条消息，{len(picked.memory)} 条笔记）")
 
     # 权限模式（Shift+Tab 循环）：ask 默认逐次询问文件改动；accept 允许编辑；yolo 全部允许
     state = {'mode': 'ask'}
@@ -390,8 +386,6 @@ def repl(mock: bool = False, max_steps: int | None = None, resume: bool = False)
                 picked = _pick_session(store, exclude_id=session.data["id"])
                 if picked is not None:
                     _switch_to(picked)
-                    print(f"  ✓ 已恢复「{picked.data['title']}」"
-                          f"（{len(messages)} 条消息，{len(picked.memory)} 条笔记）")
 
             elif intent['type'] == 'set':
                 cfg_key = intent['key']
@@ -407,14 +401,6 @@ def repl(mock: bool = False, max_steps: int | None = None, resume: bool = False)
                 print(f"  {ui.paint('green', '✓')} 已更新 {display} = {shown}")
 
             elif intent['type'] in ('chat', 'run'):
-                workspace = session.data.get('workspace') or config['workspace']
-                registry = runtime['tools'](workspace)
-                tools = [] if mock else registry.list()
-                # 首次对话时初始化消息
-                if not messages:
-                    system_prompt = build_chat_system_prompt(workspace)
-                    messages.append(SystemMessage(content=system_prompt))
-
                 if intent['type'] == 'run':
                     # /run 读取任务文件内容交给 LLM，而不是把路径字符串发过去
                     run_file = Path(intent.get('file', ''))
@@ -422,32 +408,43 @@ def repl(mock: bool = False, max_steps: int | None = None, resume: bool = False)
                         print(f'  ⚠ 任务文件不存在: {run_file}')
                         continue
                     chat_text = run_file.read_text(encoding='utf-8')
-                    session.note_title(f"/run {intent.get('file', '')}")
+                    title = f"/run {intent.get('file', '')}"
                 else:
-                    chat_text = intent.get('text', '')
-                    session.note_title(chat_text)
-                messages.append(UserMessage(content=chat_text))
-
-                action_step = 0
-
-                def handle_action(_, action):
-                    nonlocal action_step
-                    action_step += 1
-                    summary = _repl_handle_action(action, messages, runtime, registry, memory, mock, state)
-                    tracer.record(action_step, action, result=summary)
+                    title = chat_text = intent.get('text', '')
 
                 try:
-                    finished = runtime['chat_loop'](messages, models.chat(mock_model), tools, handle_action,
-                                                    lambda reply: print(f'\n{reply}\n'), max_steps=max_steps, memory=memory)
-                    if not finished:
-                        print(f'  ⚠ 已达到最大执行步数 ({max_steps})。')
-                except Exception as error:
-                    print(f'  ⚠ LLM 调用失败: {error}')
-                # 每轮对话结束落盘（记忆 + 消息历史）
-                session.save(messages)
-    finally:
-        session.save(messages)
-        tracer.flush()
+                    with session.turn():
+                        messages = session.messages
+                        memory = SessionMemory(session, live_messages=messages)
+                        workspace = session.data.get('workspace') or config['workspace']
+                        registry = runtime['tools'](workspace)
+                        tools = [] if mock else registry.list()
+                        if not messages:
+                            messages.append(SystemMessage(content=build_chat_system_prompt(workspace)))
+                        session.note_title(title)
+                        messages.append(UserMessage(content=chat_text))
+                        action_step = 0
+
+                        def handle_action(_, action):
+                            nonlocal action_step
+                            action_step += 1
+                            summary = _repl_handle_action(action, messages, runtime, registry, memory, mock, state)
+                            tracer.record(action_step, action, result=summary)
+
+                        try:
+                            finished = runtime['chat_loop'](messages, models.chat(mock_model), tools, handle_action,
+                                                            lambda reply: print(f'\n{reply}\n'), max_steps=max_steps, memory=memory)
+                            if not finished:
+                                print(f'  ⚠ 已达到最大执行步数 ({max_steps})。')
+                        except Exception as error:
+                            print(f'  ⚠ LLM 调用失败: {error}')
+                        finally:
+                            session.save(messages)
+                            tracer.flush()
+                except SessionConflict as error:
+                    print(f'  ⚠ {error}')
+    except KeyboardInterrupt:
+        print()
 
     print()
 
@@ -523,11 +520,6 @@ def run(args: argparse.Namespace) -> str:
 
     # batch 模式：每次任务运行也是一个独立会话
     session = runtime['sessions'].new(workspace=workspace)
-    session.note_title(args.name or 'batch 任务')
-    messages = session.messages
-    memory = SessionMemory(session, live_messages=messages)
-    tracer = runtime['tracer'](session.data['id'])
-
     # escalate 审批策略：--yes 全自动批准；交互终端人工确认；非交互默认拒绝
     if args.yes:
         approver = lambda action: True
@@ -536,22 +528,23 @@ def run(args: argparse.Namespace) -> str:
     else:
         approver = None
 
-    answer = run_agent(
-        goal=goal,
-        task_name=args.name,
-        llm=runtime['models'].chat(MockLLM(responses=[]) if args.mock else None),
-        tool_registry=runtime['tools'](workspace),
-        memory=memory,
-        tracer=tracer,
-        max_steps=config['max_steps'] if args.max_steps is None else args.max_steps,
-        approver=approver,
-        workspace=workspace,
-        tool_executor=runtime['execute_tool'],
-        chat_loop=runtime['chat_loop'],
-        messages=messages,
-    )
-    session.save()
-    return answer
+    with session.turn():
+        session.note_title(args.name or 'batch 任务')
+        messages = session.messages
+        return run_agent(
+            goal=goal,
+            task_name=args.name,
+            llm=runtime['models'].chat(MockLLM(responses=[]) if args.mock else None),
+            tool_registry=runtime['tools'](workspace),
+            memory=SessionMemory(session, live_messages=messages),
+            tracer=runtime['tracer'](session.data['id']),
+            max_steps=config['max_steps'] if args.max_steps is None else args.max_steps,
+            approver=approver,
+            workspace=workspace,
+            tool_executor=runtime['execute_tool'],
+            chat_loop=runtime['chat_loop'],
+            messages=messages,
+        )
 
 
 def main():

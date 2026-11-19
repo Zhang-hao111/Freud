@@ -220,6 +220,26 @@ class Session:
             return
         raise SessionConflict('会话已被另一进程更新或删除，请重新打开后重试。')
 
+    @contextmanager
+    def turn(self):
+        """让 CLI 和 Web 在同一会话内串行执行和保存回合。"""
+        directory = self.path.parent / '.turn-locks'
+        directory.mkdir(mode=0o700, exist_ok=True)
+        # 会话 JSON 会原子替换。锁文件单独存放，不删除，以免并发打开不同的 inode。
+        fd = os.open(directory / self.path.stem, os.O_CREAT | os.O_RDONLY, 0o600)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise SessionConflict('该会话正在运行，请等待本轮结束。') from exc
+            try:
+                self.data = self.from_path(self.path).data
+            except FileNotFoundError as exc:
+                raise SessionConflict('会话已被删除，请新建或恢复其他会话。') from exc
+            yield
+        finally:
+            os.close(fd)
+
     def save(self, messages: list[Message] | None = None):
         with _write_lock(self.path.parent):
             self._check_revision()
@@ -263,7 +283,7 @@ class SessionStore:
         return session
 
     def delete(self, session: Session):
-        with _write_lock(self.dir):
+        with session.turn(), _write_lock(self.dir):
             if session.path.name.startswith('session-legacy-'):
                 (self.dir / '.legacy-imported').touch()
             session.path.unlink()

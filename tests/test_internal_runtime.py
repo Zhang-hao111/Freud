@@ -51,6 +51,30 @@ class ContextTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '超过模型上下文预算'):
             model_context([UserMessage(content='a' * CONTEXT_CHARS)])
 
+    def test_latest_tool_batch_keeps_each_receipt_and_diagnostic_tail(self):
+        goal = UserMessage(content='检查这批工具结果')
+        calls = [ToolCall(id=str(i), function_name='read_file') for i in range(6)]
+        action = AssistantMessage(tool_calls=calls)
+        replies = [ToolMessage(content='开始' + 'x' * 9000 + '最终错误', tool_call_id=call.id) for call in calls]
+        messages = [goal, action, *replies]
+
+        projected = model_context(messages)
+
+        self.assertEqual(projected[:2], [goal, action])
+        self.assertEqual([reply.tool_call_id for reply in projected[2:]], [call.id for call in calls])
+        self.assertTrue(all(reply.content.startswith('开始') and reply.content.endswith('最终错误')
+                            for reply in projected[2:]))
+        self.assertLess(sum(len(m.content or '') for m in projected) + len(str(calls)), CONTEXT_CHARS)
+        self.assertEqual(messages[2:], replies)
+        self.assertGreater(len(replies[0].content), 9000)
+
+    def test_oversized_tool_arguments_abort_instead_of_replaying_goal(self):
+        call = ToolCall(id='write', function_name='write_file', function_arguments='x' * CONTEXT_CHARS)
+        with self.assertRaisesRegex(ValueError, '工具调用.*上下文预算'):
+            model_context([UserMessage(content='写入'),
+                           AssistantMessage(tool_calls=[call]),
+                           ToolMessage(content='已写入', tool_call_id=call.id)])
+
     def test_context_bounded_and_keeps_complete_tool_call(self):
         tool = ToolCall(id='current', function_name='shell', function_arguments='{}')
         messages = [SystemMessage(content='system')]
@@ -98,6 +122,37 @@ class ContextTests(unittest.TestCase):
 
 
 class PersistenceTests(unittest.TestCase):
+    def test_resumed_cli_refreshes_history_and_excludes_web_mutations_during_turn(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            store = SessionStore(root / 'sessions')
+            settings = {'workspace': str(root), 'traces_dir': str(root / 'traces'), 'max_steps': 2}
+            app = WebAgent(settings, store, mock=True)
+            session = store.new(workspace=str(root))
+            stale = store.get(session.data['id'])
+            session.save([UserMessage(content='Web 回合')])
+            fresh_messages = []
+
+            def run_loop(messages, *_args, **_kwargs):
+                fresh_messages.extend(messages)
+                with self.assertRaisesRegex(SessionConflict, '正在运行'):
+                    app.conversations.delete_session(session.data['id'])
+                with self.assertRaisesRegex(SessionConflict, '正在运行'):
+                    app.chat(session, '并发 Web 回合', Mock())
+                return True
+
+            runtime = {key: app.runtime[key] for key in ('sessions', 'models', 'tracer', 'tools')}
+            runtime['chat_loop'] = run_loop
+            with patch.object(cli, 'ensure_config'), patch.object(cli, 'load_config', return_value=settings), \
+                 patch.object(cli, 'default_runtime', return_value=runtime), \
+                 patch.object(cli, '_pick_session', return_value=stale), patch.object(cli, '_print_banner'), \
+                 patch.object(cli.term, 'prepare_pinned_prompt'), patch.object(cli.term, 'clear_pinned_box'), \
+                 patch.object(cli.term, 'read_line', side_effect=['CLI 回合', EOFError]):
+                cli.repl(mock=True, resume=True)
+
+            self.assertEqual([m.content for m in fresh_messages], ['Web 回合', 'CLI 回合'])
+            self.assertEqual(store.get(session.data['id']).messages, fresh_messages)
+
     def test_stale_writer_cannot_overwrite_or_recreate_session(self):
         with tempfile.TemporaryDirectory() as root:
             store = SessionStore(Path(root))

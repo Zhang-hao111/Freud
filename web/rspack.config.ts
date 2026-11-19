@@ -5,6 +5,10 @@ import { rspack } from '@rspack/core'
 
 const root = fileURLToPath(new URL('.', import.meta.url))
 const production = process.env.NODE_ENV === 'production'
+const devHost = '127.0.0.1'
+const devPort = 8090
+const devAuthority = `${devHost}:${devPort}`
+const apiOrigin = 'http://127.0.0.1:8875'
 
 export default defineConfig({
   context: root,
@@ -45,5 +49,20 @@ export default defineConfig({
     new rspack.HtmlRspackPlugin({ template: './src/index.html' }),
     new rspack.CopyRspackPlugin({ patterns: [{ from: 'LICENSE' }] }),
   ],
-  devServer: { port: 8090 },
+  devServer: {
+    host: devHost,
+    port: devPort,
+    proxy: [{
+      pathFilter: (pathname, request) => pathname.startsWith('/api/') && request.headers.host === devAuthority,
+      target: apiOrigin,
+      changeOrigin: true,
+      on: {
+        proxyReq: (proxyRequest, request) => {
+          if (request.headers.origin === `http://${devAuthority}`) {
+            proxyRequest.setHeader('Origin', apiOrigin)
+          }
+        },
+      },
+    }],
+  },
 })

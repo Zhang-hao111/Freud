@@ -159,6 +159,23 @@ class WebAgentTests(unittest.TestCase):
         self.assertEqual(restored.messages[-1].tool_call_id, 'pwd')
         self.assertEqual(restored.messages[-1].content.strip(), self.tmp.name)
 
+    def test_disconnected_approval_releases_session_without_executing_tool(self):
+        action = Action(type='call_tool', tool='write_file', args={'path': 'a', 'content': 'x'}, tool_call_id='write')
+        app = WebAgent(self.config, self.store, lambda: MockLLM([action]))
+        session = app.conversations.new_session()
+        heartbeat = Mock(side_effect=BrokenPipeError)
+        events = []
+
+        with self.assertRaises(BrokenPipeError):
+            app.chat(session, '测试', events.append, heartbeat=heartbeat)
+
+        heartbeat.assert_called_once_with()
+        approval = next(event for event in events if event['type'] == 'approval')
+        self.assertFalse(app.approve(approval['id'], True))
+        self.assertFalse((Path(self.tmp.name) / 'a').exists())
+        self.assertEqual(app.conversations.run_status(session.data['id']), 'idle')
+        self.assertEqual(self.store.get(session.data['id']).messages[-1].tool_call_id, 'write')
+
     def test_new_turn_uses_latest_history_even_if_transport_holds_an_old_snapshot(self):
         conversations = WebAgent(self.config, self.store, lambda: MockLLM(['完成'])).conversations
         session = conversations.new_session()

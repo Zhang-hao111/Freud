@@ -8,7 +8,7 @@ from agent.core import build_chat_system_prompt
 from agent.events import Emit, RunCancelled
 from agent.llm import MockLLM
 from agent.permissions import MODES
-from agent.session import Session, SessionMemory
+from agent.session import SessionMemory
 from agent.tool_execution import record_tool_reply
 from agent.tracer import Tracer
 from agent.types import Action, AssistantMessage, SystemMessage, UserMessage
@@ -56,7 +56,8 @@ class Conversations:
             session = self.session(session_id)
             if not session:
                 raise ValueError('会话不存在')
-            self.workflows.clear_context(session)
+            with session.turn():
+                self.workflows.clear_context(session)
 
     def delete_session(self, session_id):
         with self.lock:
@@ -90,23 +91,19 @@ class Conversations:
     @contextmanager
     def _session_turn(self, session):
         session_id = session.data['id']
-        with self.lock:
-            if session_id in self.active:
-                raise ValueError('该会话正在运行')
-            # 入口读取的快照可能早于上个回合或清除上下文的操作。
-            try:
-                session.data = Session.from_path(session.path).data
-            except FileNotFoundError as exc:
-                raise ValueError('会话不存在') from exc
-            directory = self.workspaces.session_directory(session)
-            if not directory.is_dir() or str(directory) not in self.workspace_ids():
-                raise ValueError('请先添加此对话所在的工作区，并确认目录仍然存在。')
-            self.active[session_id] = Event()
-        try:
-            yield str(directory)
-        finally:
+        with session.turn():
             with self.lock:
-                self.active.pop(session_id, None)
+                if session_id in self.active:
+                    raise ValueError('该会话正在运行')
+                directory = self.workspaces.session_directory(session)
+                if not directory.is_dir() or str(directory) not in self.workspace_ids():
+                    raise ValueError('请先添加此对话所在的工作区，并确认目录仍然存在。')
+                self.active[session_id] = Event()
+            try:
+                yield str(directory)
+            finally:
+                with self.lock:
+                    self.active.pop(session_id, None)
 
     def run_workflow(self, session, text, request, emit: Emit):
         if self.mock:
@@ -186,6 +183,8 @@ class Conversations:
         except RunCancelled as exc:
             messages.append(AssistantMessage(content=str(exc)))
             emit({'type': 'error', 'content': str(exc)})
+        except (BrokenPipeError, ConnectionResetError):
+            raise
         except Exception as exc:
             emit({'type': 'error', 'content': str(exc)})
         finally:

@@ -103,7 +103,7 @@ uv run --extra movielens freud-web
 先按上面的步骤构建网页，再从仓库根目录打包 Agent 和课程插件。
 
 ```bash
-uv build --wheel --out-dir dist
+test -f agent/web_dist/index.html && uv build --wheel --out-dir dist
 uv build --wheel --out-dir dist plugins/movielens
 ```
 
@@ -115,7 +115,7 @@ uv pip install ./coding_agent-*.whl ./freud_movielens-*.whl
 .venv/bin/freud-web
 ```
 
-Agent wheel 已包含静态网页资源，安装后可以在任意工作目录开启网页。只使用通用 Agent 时，可只安装 `coding_agent` wheel。运行课程任务前，仍需准备 MovieLens 数据并配置 Hadoop。
+按以上步骤构建的 Agent wheel 包含静态网页资源，安装后可以在任意工作目录开启网页。只使用 CLI 时，可从干净的源码目录执行 `uv tool install .`。运行课程任务前，仍需准备 MovieLens 数据并配置 Hadoop。
 
 ## 网页交互
 
@@ -187,6 +187,8 @@ pnpm build
 ```
 
 自动化测试包括工具调用协议、会话和网页任务、Hadoop 工作脚本，以及小型 MovieLens 格式数据上的模型训练与查询。实际数据的评分和分析结论以对应任务生成的报告为准。
+
+需要热更新前端时，先启动默认端口的 `freud-web`，再在 `web` 目录运行 `pnpm dev`，访问 `http://127.0.0.1:8090/`。
 
 ## 其他入口
 

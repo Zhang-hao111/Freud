@@ -44,7 +44,7 @@ class WebAgent:
             pending['event'].set()
             return True
 
-    def _confirm_tool(self, action, _gate, reason, emit, session_id):
+    def _confirm_tool(self, action, reason, emit, session_id, heartbeat):
         request_id = uuid.uuid4().hex
         pending = {'event': threading.Event(), 'approved': False}
         with self.lock:
@@ -52,19 +52,29 @@ class WebAgent:
         try:
             emit({'type': 'approval', 'id': request_id, 'tool': action.tool,
                   'args': action.args or {}, 'reason': reason})
-            deadline = time.monotonic() + 300
-            while time.monotonic() < deadline and not pending['event'].wait(.1):
+            now = time.monotonic()
+            deadline = now + 300
+            next_heartbeat = now + 1
+            while not pending['event'].wait(.1):
                 self.conversations.checkpoint(session_id)
+                now = time.monotonic()
+                if now >= deadline:
+                    return False
+                if heartbeat is not None and now >= next_heartbeat:
+                    heartbeat()
+                    next_heartbeat = now + 1
             self.conversations.checkpoint(session_id)
             return pending['approved']
         finally:
             with self.lock:
                 self.pending.pop(request_id, None)
 
-    def chat(self, session, text, emit, **options):
+    def chat(self, session, text, emit, *, heartbeat=None, **options):
         return self.conversations.chat(
             session, text, emit, **options,
-            approve=lambda action, gate, reason: self._confirm_tool(action, gate, reason, emit, session.data['id']),
+            approve=lambda action, _gate, reason: self._confirm_tool(
+                action, reason, emit, session.data['id'], heartbeat,
+            ),
         )
 
 
@@ -196,9 +206,14 @@ def make_handler(app):
                 def emit(event):
                     self.wfile.write((json.dumps(event, ensure_ascii=False) + '\n').encode())
                     self.wfile.flush()
+                def heartbeat():
+                    # 空行不产生界面事件，写失败时清理正在等待的审批。
+                    self.wfile.write(b'\n')
+                    self.wfile.flush()
                 try:
                     if self.path == '/api/chat':
-                        app.chat(session, text.strip(), emit, followup=data.get('followup') is True, permission_mode=data.get('permission_mode', 'ask'))
+                        app.chat(session, text.strip(), emit, followup=data.get('followup') is True,
+                                 permission_mode=data.get('permission_mode', 'ask'), heartbeat=heartbeat)
                     else:
                         conversations.run_workflow(session, text.strip(), data, emit)
                 except ValueError as exc:
